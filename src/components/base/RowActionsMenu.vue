@@ -22,6 +22,24 @@ const ICONS: Record<string, string> = {
   unban: 'M5 13l4 4L19 7',
   ban: 'M18.4 5.6a9 9 0 11-12.8 12.8 9 9 0 0112.8-12.8zM5.6 5.6l12.8 12.8',
   role: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z',
+  /**
+   * Shield with a tick, for granting moderator rights. Distinct from `approve`,
+   * which is a bare tick: that one clears a single submission, this one hands
+   * someone the standing authority to clear them. A second person silhouette
+   * would have been indistinguishable from `role` at 16px.
+   */
+  moderator:
+    'M9 12.75L11.25 15 15 9.75M12 2.714a11.959 11.959 0 01-8.402 3.286A11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152a11.959 11.959 0 01-8.25-3.285z',
+  /**
+   * The same shield with a minus where the tick is — grant and revoke differ
+   * only by the mark inside, which is what makes the pair readable at 16px.
+   *
+   * Not the struck-through treatment `unhidden` and `unpinned` use: a diagonal
+   * long enough to read as a slash swallows the shield at this size, leaving
+   * something closer to a no-entry sign than a revoked badge.
+   */
+  'remove-moderator':
+    'M12 2.714a11.959 11.959 0 01-8.402 3.286A11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152a11.959 11.959 0 01-8.25-3.285z M9 12.75h6',
   placement:
     'M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.42A12 12 0 0118 15.29 12 12 0 0112 21a12 12 0 01-6.16-5.71A12 12 0 015.84 10.58L12 14z',
   reject: 'M6 18L18 6M6 6l12 12',

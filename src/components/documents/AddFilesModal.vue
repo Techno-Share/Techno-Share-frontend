@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatFileSize } from '@/utils/format'
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { fileExtension, isImageFile } from '@/utils/format'
@@ -28,7 +29,7 @@ const props = withDefaults(
     loading?: boolean
     progress?: number
   }>(),
-  { maxFiles: 10, maxFileSizeBytes: 20 * 1024 * 1024, loading: false, progress: 0 },
+  { maxFiles: 10, maxFileSizeBytes: 50 * 1024 * 1024, loading: false, progress: 0 },
 )
 
 const emit = defineEmits<{ (e: 'close'): void; (e: 'confirm', files: File[]): void }>()
@@ -71,7 +72,11 @@ function accept(incoming: File[]) {
       continue
     }
     if (file.size > props.maxFileSizeBytes) {
-      error.value = t('document.documentDetailsPage.fileTooLarge', { name: file.name })
+      error.value = t('document.documentDetailsPage.fileTooLarge', {
+        name: file.name,
+        size: formatFileSize(Math.round(file.size / 1024)),
+        max: `${Math.round(props.maxFileSizeBytes / 1024 / 1024)} MB`,
+      })
       continue
     }
     if (seen.has(`${file.name}:${file.size}`)) {

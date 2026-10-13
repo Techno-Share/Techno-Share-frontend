@@ -9,7 +9,23 @@
     "invalid": "Please enter a valid date (dd/mm/yyyy)",
     "invalidDay": "Day must be between 1 and 31",
     "invalidMonth": "Month must be between 1 and 12",
-    "past": "Date can’t be in the past"
+    "past": "Date can’t be in the past",
+    "today": "Today",
+    "close": "Close",
+    "prevMonth": "Previous month",
+    "nextMonth": "Next month"
+  },
+  "timeField": {
+    "hour": "Hour",
+    "minute": "Minute",
+    "now": "Now",
+    "invalid": "Please enter a valid time (hh:mm)",
+    "invalidHour": "Hour must be between 00 and 23",
+    "invalidMinute": "Minute must be between 00 and 59"
+  },
+  "password": {
+    "show": "Show password",
+    "hide": "Hide password"
   },
   "nav": {
     "home": "Home",
@@ -127,7 +143,8 @@
     "confirm": "Confirm"
   },
   "toast": {
-    "uploadSuccess": "Document uploaded. It will appear once an admin approves it."
+    "uploadSuccess": "Document uploaded. It will appear once an admin approves it.",
+    "fixFields": "Please fix the highlighted fields"
   },
   "completeProfile": {
     "title": "One more thing",

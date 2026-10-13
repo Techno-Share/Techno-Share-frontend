@@ -41,7 +41,7 @@ body {
 }
 
 .router-link-exact-active {
-  @apply text-[#0057BD];
+  @apply text-primary;
 }
 
 /* Hide the scrollbar while keeping scroll (used by horizontal chip rows). */
@@ -51,19 +51,4 @@ body {
 }
 .scrollbar-hide::-webkit-scrollbar {
   display: none; /* Chrome / Safari */
-}
-
-/*
- * Hide a date input's built-in picker icon.
- *
- * For fields that supply their own calendar button: the native indicator sits
- * inside the text box, cannot be moved or restyled, and leaving it shows two
- * calendars side by side. The picker itself is untouched — showPicker() still
- * opens it, and typing into the field works as before.
- */
-.no-native-picker::-webkit-calendar-picker-indicator {
-  display: none;
-}
-.no-native-picker::-webkit-inner-spin-button {
-  display: none;
 }

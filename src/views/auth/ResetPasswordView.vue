@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import PasswordField from '@/components/base/PasswordField.vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth.store'
@@ -161,14 +162,14 @@ async function submit(e: Event) {
             <label for="new-password" class="text-sm font-semibold text-gray-600">{{
               t('auth.reset.password')
             }}</label>
-            <input
-              id="new-password"
+            <PasswordField
               v-model="password"
-              @blur="validate"
-              type="password"
+              id="new-password"
               autocomplete="new-password"
               :placeholder="t('auth.reset.yourPassword')"
-              class="mt-1.5 w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+              wrapper-class="mt-1.5"
+              class="w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+              @blur="validate"
             />
             <p v-if="errors.password" class="mt-1 text-sm text-red-500">
               {{ t(errors.password) }}
@@ -179,14 +180,14 @@ async function submit(e: Event) {
             <label for="confirm-password" class="text-sm font-semibold text-gray-600">{{
               t('auth.reset.confirm')
             }}</label>
-            <input
-              id="confirm-password"
+            <PasswordField
               v-model="confirm"
-              @blur="validate"
-              type="password"
+              id="confirm-password"
               autocomplete="new-password"
               :placeholder="t('auth.reset.confirmPassword')"
-              class="mt-1.5 w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+              wrapper-class="mt-1.5"
+              class="w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+              @blur="validate"
             />
             <p v-if="errors.confirm" class="mt-1 text-sm text-red-500">{{ t(errors.confirm) }}</p>
           </div>

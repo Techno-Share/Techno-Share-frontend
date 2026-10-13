@@ -58,6 +58,17 @@ export interface AdminDocument {
   title: string
   doc_type: string
   uploaded_at: string
+  /**
+   * The REVIEW state, and only ever 'active' or 'rejected' here — a pending
+   * upload belongs to the Approvals queue and getAllDocuments refuses to list
+   * one. Hidden and expired are separate facts; see `hidden_at`/`expires_at`
+   * and docDisplayStatus, which folds all four into the one Status column.
+   */
+  status: 'active' | 'rejected'
+  /** Set when the uploader withdrew it from circulation. */
+  hidden_at: string | null
+  /** Why it was turned down; null unless rejected. */
+  rejection_reason: string | null
   description: string | null
   year_level: number | null
   users: AdminUserRef | null
@@ -65,21 +76,14 @@ export interface AdminDocument {
    *  that account has since been deleted. */
   approved_by: AdminUserRef | null
   majors: AdminMajorRef | null
+  /** Which academic year the material belongs to, e.g. "2025-2026". */
+  academic_year: string | null
+  /** Who may see it, as (department, year) pairs. Empty means everyone. */
+  audience: { major_id: string; year_level: number }[]
+  /** Soft expiry (ISO). Null = never. */
+  expires_at: string | null
   subjects: { id: string; name: string } | null
   documents: AdminDocumentFile[]
-}
-
-/** GET /admin/pending/subjects */
-export interface AdminPendingSubject {
-  id: string
-  name: string
-  acronym: string | null
-  year_level: number | null
-  semester: number | null
-  subject_url: string | null
-  created_at: string
-  majors: AdminMajorRef | null
-  users: AdminUserRef | null
 }
 
 /**

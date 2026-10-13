@@ -26,7 +26,6 @@ type SidebarRoute =
   | 'dashboard-books-reserved'
   | 'dashboard-books-requesting'
   | 'profile'
-  | 'dashboard-review-subjects'
   | 'dashboard-review-documents'
 
 type NavItem = {
@@ -115,45 +114,19 @@ const trailingItems = computed<NavItem[]>(() => [
 ])
 
 /**
- * The review queue, split the way the work is: subjects and documents are
- * separate queues with their own filters, not one list to scroll.
+ * The review queue — a plain entry, not a heading.
+ *
+ * It used to expand into subjects and documents, two queues with their own
+ * filters. Subjects are no longer reviewed, so the group had one child left: a
+ * chevron that revealed a single row repeating the heading above it. The
+ * content moved up into the entry itself, which now goes straight to the
+ * document queue. The admin panel settled the same question the same way.
  */
-const reviewGroup = computed<NavGroup>(() => ({
+const reviewItem = computed<NavItem>(() => ({
+  name: 'dashboard-review-documents',
   label: t('dashboard.sidebar.nav.review'),
   short: t('dashboard.sidebar.short.review'),
-  children: [
-    {
-      name: 'dashboard-review-subjects',
-      label: t('dashboard.sidebar.nav.reviewSubjects'),
-      short: t('dashboard.sidebar.nav.reviewSubjects'),
-    },
-    {
-      name: 'dashboard-review-documents',
-      label: t('dashboard.sidebar.nav.reviewDocuments'),
-      short: t('dashboard.sidebar.nav.reviewDocuments'),
-    },
-  ],
 }))
-
-const reviewOpen = ref(false)
-
-const reviewActive = computed(() =>
-  reviewGroup.value.children.some((child) => route.name === child.name),
-)
-
-watch(
-  reviewActive,
-  (active) => {
-    if (active) reviewOpen.value = true
-  },
-  { immediate: true },
-)
-
-function openReview() {
-  reviewOpen.value = true
-  const first = reviewGroup.value.children[0]
-  if (first) void router.push({ name: first.name })
-}
 
 /** Open state of the Book Activity group. */
 const activityOpen = ref(false)
@@ -176,47 +149,18 @@ watch(
  * Flattened for rendering: one v-for keeps the icon switch in a single place
  * rather than repeating the button markup per section.
  */
-type NavGroupKey = 'activity' | 'review'
-type NavRow =
-  | { heading: string; short: string; group: NavGroupKey }
-  | { item: NavItem; child?: boolean }
+type NavRow = { heading: string; short: string } | { item: NavItem; child?: boolean }
 
 const navRows = computed<NavRow[]>(() => [
   ...navItems.value.map((item) => ({ item })),
   {
     heading: bookActivity.value.label,
     short: bookActivity.value.short,
-    group: 'activity' as const,
   },
   ...(activityOpen.value ? bookActivity.value.children.map((item) => ({ item, child: true })) : []),
-  ...(canReview.value
-    ? [
-        {
-          heading: reviewGroup.value.label,
-          short: reviewGroup.value.short,
-          group: 'review' as const,
-        },
-        ...(reviewOpen.value
-          ? reviewGroup.value.children.map((item) => ({ item, child: true }))
-          : []),
-      ]
-    : []),
+  ...(canReview.value ? [{ item: reviewItem.value }] : []),
   ...trailingItems.value.map((item) => ({ item })),
 ])
-
-/** Per-group state, so the one heading row in the template serves both. */
-const isGroupOpen = (group: NavGroupKey) =>
-  group === 'activity' ? activityOpen.value : reviewOpen.value
-const isGroupActive = (group: NavGroupKey) =>
-  group === 'activity' ? activityActive.value : reviewActive.value
-function toggleGroup(group: NavGroupKey) {
-  if (group === 'activity') activityOpen.value = !activityOpen.value
-  else reviewOpen.value = !reviewOpen.value
-}
-function openGroup(group: NavGroupKey) {
-  if (group === 'activity') openActivity()
-  else openReview()
-}
 
 function isActive(item: NavItem) {
   return route.name === item.name
@@ -274,7 +218,7 @@ function openActivity() {
             'relative w-16 shrink-0 flex-col justify-center gap-1 py-1.5 md:w-full md:flex-row md:gap-3 md:py-2.5 md:px-3',
             // The group carries the block of colour; its entries below stay
             // plain, so only one row in the section reads as a panel.
-            isGroupActive(row.group)
+            activityActive
               ? 'bg-primary text-white font-semibold shadow-sm'
               : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700',
             i > 0 ? 'md:mt-1' : '',
@@ -283,26 +227,12 @@ function openActivity() {
           <button
             type="button"
             class="flex min-w-0 w-full flex-col items-center justify-center gap-1 hover:cursor-pointer md:w-auto md:flex-1 md:flex-row md:gap-3 md:text-left"
-            @click="openGroup(row.group)"
+            @click="openActivity()"
           >
-            <!-- One icon per group. They used to share the inbox tray — "things
-                 arriving" is true of both — but side by side in the phone's row
-                 two identical icons are two unlabelled tabs. -->
-            <!-- Clipboard with a tick: submissions waiting to be checked. -->
-            <svg
-              v-if="row.group === 'review'"
-              class="h-5 w-5 shrink-0"
-              fill="currentColor"
-              viewBox="0 0 640 640"
-            >
-              <path
-                d="M384 64C407.7 64 428.4 76.9 439.4 96L448 96C483.3 96 512 124.7 512 160L512 512C512 547.3 483.3 576 448 576L192 576C156.7 576 128 547.3 128 512L128 160C128 124.7 156.7 96 192 96L200.6 96C211.6 76.9 232.3 64 256 64L384 64zM410.9 276.6C400.2 268.8 385.2 271.2 377.4 281.9L291.8 399.6L265.3 372.2C256.1 362.7 240.9 362.4 231.4 371.6C221.9 380.8 221.6 396 230.8 405.5L277.2 453.5C282.1 458.6 289 461.3 296.1 460.8C303.2 460.3 309.7 456.7 313.9 451L416.2 310.1C424 299.4 421.6 284.4 410.9 276.6zM264 128C250.7 128 240 138.7 240 152C240 165.3 250.7 176 264 176L376 176C389.3 176 400 165.3 400 152C400 138.7 389.3 128 376 128L264 128z"
-              />
-            </svg>
             <!-- Open book with a tick: requests about books, answered. Drawn
                  here rather than imported — fill-rule evenodd turns the second
                  subpath into a cut-out, so the tick reads through the page. -->
-            <svg v-else class="h-5 w-5 shrink-0" fill="currentColor" viewBox="0 0 640 640">
+            <svg class="h-5 w-5 shrink-0" fill="currentColor" viewBox="0 0 640 640">
               <path
                 fill-rule="evenodd"
                 d="M320 180C260 130 160 120 70 140L70 470C160 450 260 460 320 510C380 460 480 450 570 470L570 140C480 120 380 130 320 180ZM200 330L300 430L470 250L430 210L300 350L240 290Z"
@@ -318,21 +248,21 @@ function openActivity() {
 
           <!-- Collapsed, the count would otherwise be hidden with its entry. -->
           <span
-            v-if="row.group === 'activity' && !activityOpen && pendingIncomingCount"
+            v-if="!activityOpen && pendingIncomingCount"
             class="h-5 min-w-5 px-1.5 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center max-md:absolute max-md:-right-1 max-md:-top-1"
             >{{ pendingIncomingCount }}</span
           >
 
           <button
             type="button"
-            :aria-expanded="isGroupOpen(row.group)"
+            :aria-expanded="activityOpen"
             :aria-label="row.heading"
             class="hidden shrink-0 rounded-lg hover:cursor-pointer md:block"
-            @click="toggleGroup(row.group)"
+            @click="activityOpen = !activityOpen"
           >
             <svg
               class="h-4 w-4 shrink-0 transition-transform"
-              :class="isGroupOpen(row.group) ? 'rotate-180' : ''"
+              :class="activityOpen ? 'rotate-180' : ''"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -400,6 +330,17 @@ function openActivity() {
           >
             <path
               d="M320 312C386.3 312 440 258.3 440 192C440 125.7 386.3 72 320 72C253.7 72 200 125.7 200 192C200 258.3 253.7 312 320 312zM290.3 368C191.8 368 112 447.8 112 546.3C112 562.7 125.3 576 141.7 576L498.3 576C514.7 576 528 562.7 528 546.3C528 447.8 448.2 368 349.7 368L290.3 368z"
+            />
+          </svg>
+          <!-- Clipboard with a tick: submissions waiting to be checked. -->
+          <svg
+            v-else-if="row.item.name === 'dashboard-review-documents'"
+            class="h-5 w-5 shrink-0"
+            fill="currentColor"
+            viewBox="0 0 640 640"
+          >
+            <path
+              d="M384 64C407.7 64 428.4 76.9 439.4 96L448 96C483.3 96 512 124.7 512 160L512 512C512 547.3 483.3 576 448 576L192 576C156.7 576 128 547.3 128 512L128 160C128 124.7 156.7 96 192 96L200.6 96C211.6 76.9 232.3 64 256 64L384 64zM410.9 276.6C400.2 268.8 385.2 271.2 377.4 281.9L291.8 399.6L265.3 372.2C256.1 362.7 240.9 362.4 231.4 371.6C221.9 380.8 221.6 396 230.8 405.5L277.2 453.5C282.1 458.6 289 461.3 296.1 460.8C303.2 460.3 309.7 456.7 313.9 451L416.2 310.1C424 299.4 421.6 284.4 410.9 276.6zM264 128C250.7 128 240 138.7 240 152C240 165.3 250.7 176 264 176L376 176C389.3 176 400 165.3 400 152C400 138.7 389.3 128 376 128L264 128z"
             />
           </svg>
           <svg v-else class="h-5 w-5 shrink-0" fill="currentColor" viewBox="0 0 640 640">

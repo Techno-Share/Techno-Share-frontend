@@ -8,13 +8,30 @@ import RingSpinner from '@/components/base/RingSpinner.vue'
  * rules so the error arrives before the request does.
  */
 const props = defineProps<{
-  subject: { id: string; name: string; acronym?: string; semester?: string | number }
+  subject: {
+    id: string
+    name: string
+    acronym?: string
+    semester?: string | number
+    subject_url?: string | null
+  }
   saving?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'save', payload: { name: string; acronym: string; semester: string }): void
+  (
+    e: 'save',
+    payload: {
+      name: string
+      acronym: string
+      semester: string
+      /** A newly chosen file, uploaded in place of whatever the subject has. */
+      image: File | null
+      /** True when the existing cover was removed and none was chosen. */
+      removeImage: boolean
+    },
+  ): void
 }>()
 
 // Name: letters/numbers/spaces/hyphens in any language. Acronym: no lowercase.
@@ -25,6 +42,41 @@ const name = ref(props.subject.name)
 const acronym = ref(props.subject.acronym ?? '')
 const semester = ref(String(props.subject.semester ?? ''))
 const errors = ref({ name: '', acronym: '' })
+
+/**
+ * The cover. `cover` is a newly picked file; `coverPreview` is whatever the
+ * slot should show, which starts as the saved image and becomes an object URL
+ * once a file is chosen. The two are separate because "no new file" and "no
+ * cover at all" are different states — only the second one clears it.
+ */
+const cover = ref<File | null>(null)
+const coverPreview = ref<string | null>(props.subject.subject_url ?? null)
+/** Object URLs are revoked by hand; the browser will not collect them for us. */
+let objectUrl: string | null = null
+
+function releasePreview() {
+  if (objectUrl) URL.revokeObjectURL(objectUrl)
+  objectUrl = null
+}
+
+function pickCover(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] ?? null
+  // Re-picking the same filename fires no change event unless the input is
+  // reset, which makes "choose, remove, choose again" silently do nothing.
+  input.value = ''
+  if (!file) return
+  releasePreview()
+  cover.value = file
+  objectUrl = URL.createObjectURL(file)
+  coverPreview.value = objectUrl
+}
+
+function clearCover() {
+  releasePreview()
+  cover.value = null
+  coverPreview.value = null
+}
 
 const canSubmit = computed(() => name.value.trim() && acronym.value.trim() && !props.saving)
 
@@ -76,6 +128,12 @@ function collectChanges(): FieldChange[] {
       from: String(props.subject.semester ?? ''),
       to: semester.value,
     })
+  // The image itself cannot be shown in a text diff, so it is named instead.
+  const had = !!props.subject.subject_url
+  if (cover.value)
+    changes.push({ label: 'Cover', from: had ? 'Current image' : 'None', to: cover.value.name })
+  else if (had && !coverPreview.value)
+    changes.push({ label: 'Cover', from: 'Current image', to: 'None' })
   return changes
 }
 
@@ -95,6 +153,8 @@ function save() {
     name: name.value.trim(),
     acronym: acronym.value.trim(),
     semester: semester.value,
+    image: cover.value,
+    removeImage: !cover.value && !coverPreview.value && !!props.subject.subject_url,
   })
 }
 
@@ -104,7 +164,10 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Enter') submit()
 }
 onMounted(() => document.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown)
+  releasePreview()
+})
 
 const INPUT_CLASS =
   'rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary'
@@ -141,6 +204,48 @@ const INPUT_CLASS =
         </div>
 
         <div class="min-h-0 flex-1 space-y-4 overflow-y-auto scrollbar-hide px-5 py-4">
+          <!-- Cover. The same slot the subjects table draws, so what is shown
+               here is what the row will show — falling back to the acronym,
+               which is exactly what that table does with no image. -->
+          <div class="flex items-center gap-4">
+            <div
+              class="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-gray-200 bg-gray-50"
+            >
+              <img
+                v-if="coverPreview"
+                :src="coverPreview"
+                alt=""
+                class="h-full w-full object-cover"
+              />
+              <span v-else class="text-xs font-bold text-gray-300">{{ acronym || 'COVER' }}</span>
+            </div>
+            <div class="flex flex-col gap-1">
+              <label
+                class="cursor-pointer rounded-xl border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-primary hover:text-primary"
+                :class="saving ? 'pointer-events-none opacity-60' : ''"
+              >
+                <input
+                  type="file"
+                  class="hidden"
+                  accept="image/png,image/jpeg,image/webp"
+                  :disabled="saving"
+                  @change="pickCover"
+                />
+                {{ coverPreview ? 'Change cover' : 'Upload cover' }}
+              </label>
+              <button
+                v-if="coverPreview"
+                type="button"
+                class="text-left text-xs text-gray-400 transition hover:text-red-500 hover:cursor-pointer disabled:opacity-60"
+                :disabled="saving"
+                @click="clearCover"
+              >
+                Remove
+              </button>
+              <p v-else class="text-[11px] text-gray-400">PNG, JPEG or WebP</p>
+            </div>
+          </div>
+
           <div class="flex flex-col gap-1.5">
             <label class="text-sm font-medium text-gray-600">Name</label>
             <input v-model="name" :class="INPUT_CLASS" @blur="validate" />

@@ -447,7 +447,24 @@ async function confirmDeleteBook() {
 
 <template>
   <!-- ── Books I'm donating ──────────────────────────────────────────── -->
-  <div class="w-full flex flex-1 min-h-0 flex-col gap-3">
+  <!-- A FIXED height while a request is open, a growing column otherwise.
+       The grids must be free to grow — capping them would clip rows — but the
+       detail panel is meant to end level with the sidebar and scroll inside
+       itself, and `flex-1` has nothing to push against until something above
+       it is definite. min-height will not do: it grows with the content, so
+       the panel never overflows and never scrolls.
+
+       md:flex-none goes with it: `flex-1` means `flex-basis: 0%`, which takes
+       over the main axis and leaves the height ignored — the panel then sizes
+       to its content and overflows the column instead of scrolling.
+
+       Set here rather than in DashboardView's FILLS_COLUMN because that list
+       is keyed on the route, and which shape we are in is local state — the
+       grid and its detail share one route. -->
+  <div
+    class="w-full flex flex-1 min-h-0 flex-col gap-3"
+    :class="openedRequest ? 'md:h-[calc(100vh-148px)] md:flex-none' : ''"
+  >
     <div class="flex items-center justify-between gap-2">
       <!-- Two titles, one per width. The phone gets the page title itself so
            it shares this row with the controls instead of sitting on a line of
@@ -567,7 +584,7 @@ async function confirmDeleteBook() {
           v-if="openedRequest"
           :request="openedRequest"
           :busy="requestAction === openedRequest.id"
-          class="flex-1 md:mt-0 mt-3"
+          class="min-h-0 flex-1 md:mt-0 mt-3"
           @close="closeRequest"
           @confirm-received="onConfirmReceived(openedRequest!.book.id, openedRequest!.id)"
           @cancel-request="onCancelReservation(openedRequest!.book.id, openedRequest!.id)"

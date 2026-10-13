@@ -46,7 +46,7 @@ async function openToast(toast: Toast) {
           v-for="toast in toasts"
           :key="toast.id"
           :class="[
-            'pointer-events-auto flex w-full items-start gap-3 rounded-2xl border-l-4 border-primary bg-white p-3 shadow-lg ring-1 ring-black/5',
+            'pointer-events-auto relative flex w-full items-start gap-3 overflow-hidden rounded-2xl border-l-4 border-primary bg-white p-3 shadow-lg ring-1 ring-black/5',
             // Only the ones with somewhere to go invite a click.
             toast.to ? 'cursor-pointer transition hover:bg-gray-50' : '',
           ]"
@@ -110,8 +110,55 @@ async function openToast(toast: Toast) {
               <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
+
+          <!-- How long is left, as a bar that empties along the bottom edge.
+               A toast dismisses itself and otherwise gives no warning; this
+               makes the deadline visible, so a message that is about to go can
+               be read or clicked rather than missed.
+
+               Skipped entirely when duration is 0 — that toast waits for a
+               dismissal, and a bar that never moves would promise a countdown
+               that is not running. -->
+          <div
+            v-if="toast.duration > 0"
+            class="toast-countdown absolute inset-x-0 bottom-0 h-1 origin-left bg-primary/40"
+            :style="{ animationDuration: `${toast.duration}ms` }"
+            aria-hidden="true"
+          />
         </div>
       </TransitionGroup>
     </div>
   </Teleport>
 </template>
+
+<style scoped>
+/*
+ * scaleX rather than width: the bar runs for seconds on a corner of the screen
+ * while the page is being used, and a width animation lays out every frame of
+ * it. A transform is handed to the compositor and costs nothing.
+ */
+@keyframes toast-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+.toast-countdown {
+  animation: toast-countdown linear forwards;
+  /* Duration comes from the element's own style, set from the toast. */
+}
+
+/*
+ * Hidden rather than frozen when motion is reduced: left full-width it would
+ * read as a progress bar stuck at 100%, which says something untrue about the
+ * toast rather than simply saying less.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .toast-countdown {
+    display: none;
+  }
+}
+</style>

@@ -84,6 +84,15 @@ HEADER="Content-Security-Policy"
 #   worker-src 'self'      The pdf.js worker is emitted as a same-origin asset.
 #            blob:         pdf.js's wrapper path, used if the worker ever moves
 #                          cross-origin.
+#   child-src              The SAME sources, for Safari. worker-src is CSP
+#                          Level 3 and WebKit only implemented it in 15.4;
+#                          before that a worker falls back to child-src, and
+#                          failing that to default-src — which is 'none' here.
+#                          So the pdf.js worker loads in Chrome and is refused
+#                          in Safari, which is a difference nothing in the app
+#                          can see. Browsers that do support worker-src ignore
+#                          child-src for workers, so this costs them nothing.
+#                          It must stay in step with worker-src above.
 #   script-src             Cloudflare's Web Analytics beacon, which it injects
 #   connect-src            into every HTML response on this zone; the beacon
 #                          both loads from and reports back to that origin.
@@ -112,7 +121,7 @@ cat > /etc/nginx/snippets/security-headers.conf <<CONF
 # ALL inherited add_header directives the moment a block declares one, so a
 # policy set only at server level would be missing from exactly the responses
 # that matter most.
-add_header ${HEADER} "default-src 'none'; script-src 'self' ${CF_INSIGHTS}; style-src 'self'; img-src 'self' data: blob: ${STORAGE_ORIGIN}; font-src 'self' data:; connect-src 'self' ${API_ORIGIN} ${WS_ORIGIN} ${STORAGE_ORIGIN} ${CF_INSIGHTS}; worker-src 'self' blob:; object-src 'self' ${STORAGE_ORIGIN} ${OFFICE_VIEWER}; frame-src 'self' ${STORAGE_ORIGIN} ${OFFICE_VIEWER}; base-uri 'none'; form-action 'self'; frame-ancestors 'none';${UPGRADE}${REPORT} ${CSP_EXTRA:-}" always;
+add_header ${HEADER} "default-src 'none'; script-src 'self' ${CF_INSIGHTS}; style-src 'self'; img-src 'self' data: blob: ${STORAGE_ORIGIN}; font-src 'self' data:; connect-src 'self' ${API_ORIGIN} ${WS_ORIGIN} ${STORAGE_ORIGIN} ${CF_INSIGHTS}; worker-src 'self' blob:; child-src 'self' blob:; object-src 'self' ${STORAGE_ORIGIN} ${OFFICE_VIEWER}; frame-src 'self' ${STORAGE_ORIGIN} ${OFFICE_VIEWER}; base-uri 'none'; form-action 'self'; frame-ancestors 'none';${UPGRADE}${REPORT} ${CSP_EXTRA:-}" always;
 add_header X-Content-Type-Options "nosniff" always;
 add_header X-Frame-Options "DENY" always;
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;

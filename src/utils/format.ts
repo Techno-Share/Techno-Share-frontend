@@ -121,14 +121,20 @@ export function truncateText(text: string, maxChars = 120): string {
 }
 
 // Human-readable text — letters (any language, incl. Khmer marks), numbers,
-// spaces and hyphens, with at least one letter/number. No special characters.
-export const TEXT_NAME_PATTERN = /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s-]+$/u
+// spaces, hyphens and underscores, with at least one letter/number.
+//
+// Underscores and hyphens are here because titles are usually typed from a file
+// name: `hello_world` and `lab-report-2` are the normal shape of one, and
+// rejecting them made the field fight the most common way it gets filled.
+// Neither character means anything to a template or a query — the characters
+// that do are refused separately by FORBIDDEN_TEXT_PATTERN.
+export const TEXT_NAME_PATTERN = /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s_-]+$/u
 
 // Strip disallowed characters (e.g. from an auto-filled file name) so the value
 // passes TEXT_NAME_PATTERN without surprising the user with an instant error.
 export function sanitizeTextName(raw: string): string {
   return raw
-    .replace(/[^\p{L}\p{M}\p{N}\s-]+/gu, ' ')
+    .replace(/[^\p{L}\p{M}\p{N}\s_-]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -303,4 +309,57 @@ export function checkName(raw: string): NameProblem {
   if (/^[a-z]/.test(value)) return 'lowercase'
 
   return null
+}
+
+/**
+ * An expiry written out in full, for display: "Sun, 11 Oct 2026, 11:59 PM".
+ *
+ * Expiry carries a time now, and a date alone cannot say whether something
+ * disappears at breakfast or at midnight — which matters most on the day it
+ * happens. The weekday is there because "11 Oct" tells you less than "Sunday"
+ * when you are deciding how long to leave something up.
+ *
+ * Locale-driven: the reader's own conventions decide 11:59 PM vs 23:59 and the
+ * month's name. Shared so the upload form, the review queue and the document
+ * page cannot drift into three different renderings of one timestamp.
+ */
+export function formatExpiry(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return null
+  return at.toLocaleString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+/** Local 'YYYY-MM-DD' and 'HH:mm' for an ISO instant — the two form inputs. */
+export function isoToDateAndTime(iso: string | null | undefined): {
+  date: string
+  time: string
+} {
+  if (!iso) return { date: '', time: '' }
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return { date: '', time: '' }
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return {
+    date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+  }
+}
+
+/**
+ * The two expiry inputs back into an ISO instant, or null for "never".
+ *
+ * An empty time means end of day — the old date-only behaviour, kept so a
+ * document chosen to expire "on the 11th" still lasts through the 11th.
+ */
+export function dateAndTimeToIso(date: string, time: string): string | null {
+  if (!date) return null
+  const at = new Date(`${date}T${time || '23:59'}:00`)
+  return Number.isNaN(at.getTime()) ? null : at.toISOString()
 }

@@ -11,6 +11,12 @@ const props = defineProps<{
   isLast?: boolean
   /** Only the upload's owner gets the delete button. */
   canDelete?: boolean
+  /**
+   * Whether the upload itself is published. Drives two things: a file in an
+   * unpublished upload cannot be hidden, and it does not repeat the upload's
+   * review state — the page title carries that once.
+   */
+  uploadPublished?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -26,6 +32,37 @@ const { t } = useI18n({ useScope: 'global' })
 const isPending = computed(() => props.file.status === 'pending')
 const isRejected = computed(() => props.file.status === 'rejected')
 const isHidden = computed(() => !!props.file.hidden_at)
+/**
+ * This file's own date, falling back to its upload's.
+ *
+ * The fallback is for rows written before files had a timestamp of their own —
+ * every row showed the folder's date, so a file attached today to a folder
+ * posted last week read as a week old.
+ */
+const postedAt = computed(() => props.file.created_at ?? props.uploadedAt ?? null)
+
+/**
+ * Hiding withdraws a file from circulation, which only published files are in.
+ *
+ * The upload's status is half the answer and this component cannot see it — a
+ * file row inside a pending upload is itself written 'active', so the file
+ * alone always looks publishable. The parent, which holds the upload, passes
+ * the verdict down. The server enforces the same rule either way; see
+ * DocumentsService.setFileHidden.
+ */
+const published = computed(() => props.uploadPublished !== false)
+const canHide = computed(() => published.value && !isPending.value && !isRejected.value)
+
+/**
+ * Whether this row says anything about review.
+ *
+ * When the upload itself is pending or rejected so is every file in it, and
+ * stamping each row with the same badge the title already carries just repeats
+ * it. A file's own badge only earns its place when it DISAGREES with the
+ * upload — one file rejected inside an otherwise published upload, which is
+ * the only signal that case has.
+ */
+const showReviewBadge = computed(() => published.value)
 </script>
 
 <template>
@@ -51,7 +88,7 @@ const isHidden = computed(() => !!props.file.hidden_at)
             {{ file.original_name?.trim() || fallbackName || 'Untitled' }}
           </span>
           <span
-            v-if="isPending"
+            v-if="isPending && showReviewBadge"
             class="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700"
             >{{ t('document.documentDetailsPage.badgePending') }}</span
           >
@@ -61,21 +98,21 @@ const isHidden = computed(() => !!props.file.hidden_at)
             >{{ t('document.documentDetailsPage.badgeHidden') }}</span
           >
           <span
-            v-else-if="isRejected"
+            v-else-if="isRejected && showReviewBadge"
             class="shrink-0 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-medium text-red-700"
             >{{ t('document.documentDetailsPage.badgeRejected') }}</span
           >
         </span>
         <!-- Mobile-only meta -->
         <span class="block sm:hidden text-xs text-gray-400 mt-0.5">
-          {{ formatRelativeDate(uploadedAt) }} · {{ formatFileSize(file.file_size_kb ?? 0) }}
+          {{ formatRelativeDate(postedAt) }} · {{ formatFileSize(file.file_size_kb ?? 0) }}
         </span>
       </div>
     </div>
 
     <!-- Date — desktop only -->
     <span class="hidden sm:block text-sm text-gray-500 text-center">{{
-      formatRelativeDate(uploadedAt)
+      formatRelativeDate(postedAt)
     }}</span>
 
     <!-- Size — desktop only -->
@@ -98,7 +135,7 @@ const isHidden = computed(() => !!props.file.hidden_at)
         </svg>
       </button>
       <button
-        v-if="canDelete"
+        v-if="canDelete && canHide"
         class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-700 transition-colors hover:cursor-pointer"
         :title="
           isHidden

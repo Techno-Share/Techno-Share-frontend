@@ -12,6 +12,7 @@ import AddnewSubject from '@/components/base/IconTextButton.vue'
 import SubjectCreateModal from '@/components/subjects/SubjectCreateModal.vue'
 import { clearSubjectDraft, subjectDraftContext } from '@/composables/subjectDraft'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
+import api from '@/services/http'
 import EmptyState from '@/components/base/EmptyState.vue'
 import Breadcrumb from '@/components/base/Breadcrumb.vue'
 import { isLanguageMajor, languageLabelKey } from '@/utils/format'
@@ -83,6 +84,30 @@ watch(searchQuery, () => {
 
 watch(selectedFilter, fetchSubjects)
 
+/**
+ * Whether this reader may add a subject to THIS department.
+ *
+ * Defining what a department's subjects ARE is a curation decision, so the
+ * server limits it to an admin, or a moderator of that department. Asked here
+ * only to decide whether to offer the button — the server checks again, and a
+ * 403 from /admin/scope simply means "not a reviewer", which is an answer
+ * rather than an error.
+ */
+const canAddSubject = ref(false)
+
+async function loadCanAdd() {
+  try {
+    const { data } = await api.get<{
+      is_admin: boolean
+      majors: { id: string }[] | null
+    }>('/admin/scope')
+    canAddSubject.value =
+      data.is_admin || !!data.majors?.some((m) => m.id === currentMajor.value?.id)
+  } catch {
+    canAddSubject.value = false
+  }
+}
+
 function openCreateModal() {
   subjectsStore.createError = null
   showAddSubjectModal.value = true
@@ -102,13 +127,29 @@ async function handleCreateSubject(payload: {
     clearSubjectDraft(subjectDraftContext(currentMajor.value?.id ?? '', yearLevel))
     showAddSubjectModal.value = false
     showToast(t('common.subjectPage.submitmsg'))
+
+    /**
+     * Refetch, so the new subject is on the page without a reload.
+     *
+     * Nothing did this before because a new subject used to be created
+     * `pending` — invisible until a moderator approved it, so there was
+     * nothing for the list to show. It is published immediately now, and a
+     * list that still omits it reads as the creation having failed.
+     *
+     * The modal can target another department or year, in which case this
+     * correctly shows no change: the subject exists, just not on this page.
+     */
+    await fetchSubjects()
   } catch {
     // error shown via subjectsStore.createError
   }
 }
 
 onMounted(async () => {
+  // After the majors load: loadCanAdd matches the scope against currentMajor,
+  // which is resolved from that list and is undefined until it arrives.
   if (!majorsStore.majors.length) await majorsStore.fetchMajors()
+  void loadCanAdd()
   await fetchSubjects()
 })
 </script>
@@ -170,7 +211,7 @@ onMounted(async () => {
             </div>
 
             <AddnewSubject
-              v-if="!isLanguageDepartment"
+              v-if="!isLanguageDepartment && canAddSubject"
               :text="t('common.subjectPage.addSubject')"
               @click="openCreateModal"
             >
@@ -206,7 +247,9 @@ onMounted(async () => {
         <EmptyState
           v-else-if="displayedSubjects.length === 0"
           :message="t('common.subjectPage.noSubjects')"
-          :action-label="isLanguageDepartment ? undefined : t('common.subjectPage.addSubject')"
+          :action-label="
+            isLanguageDepartment || !canAddSubject ? undefined : t('common.subjectPage.addSubject')
+          "
           @action="openCreateModal"
         >
           <template #icon>

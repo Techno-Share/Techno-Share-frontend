@@ -200,7 +200,6 @@ watch(searchQuery, () => {
               v-for="doc in docs.documents"
               :key="doc.id"
               :doc="doc"
-              :file-count="doc.documents?.length ?? 1"
               @deleted="load"
               @hidden-changed="load"
               @pinned-changed="load"
@@ -236,6 +235,7 @@ watch(searchQuery, () => {
                 @deleted="load"
                 @hidden-changed="load"
                 @pinned-changed="load"
+                @edit="openEdit"
               />
             </div>
           </div>
@@ -246,7 +246,6 @@ watch(searchQuery, () => {
               v-for="doc in docs.documents"
               :key="doc.id"
               :doc="doc"
-              :file-count="doc.documents?.length ?? 1"
               @deleted="load"
               @hidden-changed="load"
               @pinned-changed="load"

@@ -3,9 +3,7 @@
     "nav": {
       "activity": "ផ្ទាំងគ្រប់គ្រង",
       "documents": "ឯកសារ",
-      "review": "ត្រួតពិនិត្យការដាក់ស្នើ",
-      "reviewSubjects": "មុខវិជ្ជា",
-      "reviewDocuments": "ឯកសារ"
+      "review": "ត្រួតពិនិត្យការដាក់ស្នើ"
     },
     "filters": {
       "yourBook": "សៀវភៅរបស់ខ្ញុំ",
@@ -31,7 +29,6 @@
     "dashboard-books-approve": "អនុម័តសំណើ",
     "dashboard-books-reserved": "សៀវភៅបានកក់ទុក",
     "dashboard-books-requesting": "សំណើរបស់ខ្ញុំ",
-    "dashboard-review-subjects": "ត្រួតពិនិត្យមុខវិជ្ជា",
     "dashboard-review-documents": "ត្រួតពិនិត្យឯកសារ"
   },
   "activity": {

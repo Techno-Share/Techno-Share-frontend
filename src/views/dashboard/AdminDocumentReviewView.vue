@@ -2,11 +2,14 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/services/http'
+import { useToast } from '@/composables/useToast'
+import { apiErrorMessage } from '@/utils/api-error'
 import { useAuthStore } from '@/stores/auth.store'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
 
 const route = useRoute()
 const router = useRouter()
+const { showToast } = useToast()
 const groupId = route.params.groupId as string
 
 /**
@@ -94,7 +97,10 @@ async function approveAll() {
         if (d.status === 'pending') d.status = 'active'
       })
     }
+    showToast('Approved', { duration: 5000 })
     router.push({ name: 'admin', query: { tab: 'approvals' } })
+  } catch (e) {
+    showToast(apiErrorMessage(e, 'That approval was refused'), { type: 'error' })
   } finally {
     actioning.value = null
   }
@@ -107,9 +113,13 @@ function openReject() {
 
 async function confirmReject() {
   if (!rejectModal.value) return
+  // Guards the Enter key and anything else that reaches here past the disabled
+  // button; the server rejects a blank reason regardless.
+  const reason = rejectReason.value.trim()
+  if (!reason) return
   rejecting.value = true
   try {
-    const payload = rejectReason.value.trim() ? { reason: rejectReason.value.trim() } : {}
+    const payload = { reason }
     if (isAddedFiles.value) {
       for (const doc of pendingDocs.value) {
         await api.patch(`/admin/documents/files/${doc.id}/reject`, payload)
@@ -123,7 +133,12 @@ async function confirmReject() {
     }
     rejectModal.value = null
     rejectReason.value = ''
+    showToast('Rejected', { duration: 5000 })
     router.push({ name: 'admin', query: { tab: 'approvals' } })
+  } catch (e) {
+    // Leaves the modal open with the text intact, so the reason can be fixed
+    // rather than retyped — a blank or over-long one is refused by the server.
+    showToast(apiErrorMessage(e, 'That rejection was refused'), { type: 'error' })
   } finally {
     rejecting.value = false
   }
@@ -342,11 +357,14 @@ onMounted(load)
         </div>
         <div class="flex flex-col gap-1.5">
           <label class="text-sm font-medium text-gray-700"
-            >Reason <span class="text-gray-400 font-normal">(optional)</span></label
+            >Reason <span class="font-normal text-red-500">(required)</span></label
           >
+          <!-- maxlength matches RejectDto's 300, so the cap is hit while typing
+               rather than as a 400 after pressing Confirm. -->
           <textarea
             v-model="rejectReason"
             rows="3"
+            maxlength="300"
             placeholder="e.g. Duplicate content, missing information, inappropriate..."
             class="w-full px-3 py-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-300 resize-none"
           />
@@ -363,8 +381,8 @@ onMounted(load)
           </button>
           <button
             @click="confirmReject"
-            :disabled="rejecting"
-            class="px-4 py-2 text-sm font-semibold bg-red-500 hover:bg-red-600 text-white rounded-xl transition-colors disabled:opacity-50"
+            :disabled="rejecting || !rejectReason.trim()"
+            class="px-4 py-2 text-sm font-semibold bg-red-500 hover:bg-red-600 text-white rounded-xl transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
             {{ rejecting ? 'Rejecting…' : 'Confirm Reject' }}
           </button>
