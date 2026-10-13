@@ -7,7 +7,7 @@ import { useSubjectsStore } from '@/stores/subjects.store'
 import { useBooksStore } from '@/stores/books.store'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
 import BackButton from '@/components/base/BackButton.vue'
-import { formatFileSize, formatRelativeDate } from '@/utils/format'
+import { formatFileSize, formatRelativeDate, yearMajorLabel } from '@/utils/format'
 import noImage from '@/assets/images/no-image.png'
 import FileTypeIcon from '@/components/base/FileTypeIcon.vue'
 import type { BookRequestDetail } from '@/types/books.types'
@@ -179,7 +179,10 @@ onMounted(async () => {
             </div>
             <div v-if="upload.majors?.acronym" class="grid grid-cols-2 px-5 py-3">
               <span class="text-sm text-gray-400">Major</span>
-              <span class="text-sm font-medium text-gray-800">{{ upload.majors.acronym }}</span>
+              <!-- The cohort, as everywhere else an upload names its department. -->
+              <span class="text-sm font-medium text-gray-800">{{
+                yearMajorLabel(upload.majors.acronym, upload.year_level)
+              }}</span>
             </div>
             <div class="grid grid-cols-2 px-5 py-3">
               <span class="text-sm text-gray-400">Submitted</span>
@@ -236,7 +239,9 @@ onMounted(async () => {
         />
       </template>
 
-      <!-- ── Rejected subject ───────────────────────────────────────────────── -->
+      <!-- ── Subject an older notification referred to ───────────────────────
+           Subjects have no review, so nothing produces these notifications
+           any more; the panel stays for the ones already sent. -->
       <template v-else-if="refType === 'subject' && subject">
         <!-- Subject info -->
         <div class="rounded-2xl border border-gray-200 bg-white overflow-hidden">
@@ -260,20 +265,10 @@ onMounted(async () => {
               <span class="text-sm text-gray-400">Semester</span>
               <span class="text-sm font-medium text-gray-800">Semester {{ subject.semester }}</span>
             </div>
-            <div v-if="subject.rejection_reason" class="grid grid-cols-2 px-5 py-3">
-              <span class="text-sm text-gray-400">Rejection Reason</span>
-              <span class="text-sm font-medium text-red-600">{{ subject.rejection_reason }}</span>
-            </div>
             <div class="grid grid-cols-2 px-5 py-3">
               <span class="text-sm text-gray-400">Submitted</span>
               <span class="text-sm font-medium text-gray-800">{{
                 formatRelativeDate(subject.created_at)
-              }}</span>
-            </div>
-            <div class="grid grid-cols-2 px-5 py-3">
-              <span class="text-sm text-gray-400">Rejected</span>
-              <span class="text-sm font-medium text-gray-800">{{
-                formatRelativeDate(subject.rejected_at)
               }}</span>
             </div>
           </div>

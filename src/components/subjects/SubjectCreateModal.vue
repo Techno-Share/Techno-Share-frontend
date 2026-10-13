@@ -293,7 +293,7 @@ onBeforeUnmount(() => {
               @blur="handleNameBlur"
               @input="handleNameInput"
               :placeholder="t('common.subjectCreateModal.nameLabel')"
-              class="w-full rounded-xl border border-[#D9D9D9] bg-white px-4 py-2 text-sm outline-none transition sm:text-base focus:border-[#0057BD]"
+              class="w-full rounded-xl border border-[#D9D9D9] bg-white px-4 py-2 text-sm outline-none transition sm:text-base focus:border-primary"
             />
             <p v-if="nameError" class="text-sm text-red-600">
               {{ nameError }}
@@ -363,8 +363,8 @@ onBeforeUnmount(() => {
               class="flex min-h-24 cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-5 py-4 text-center transition"
               :class="
                 isDragActive
-                  ? 'border-[#0057BD] bg-[#F3F8FF]'
-                  : 'border-[#D3D3D3] bg-[#FAFAFA] hover:border-[#0057BD] hover:bg-[#F3F8FF]'
+                  ? 'border-primary bg-[#F3F8FF]'
+                  : 'border-[#D3D3D3] bg-[#FAFAFA] hover:border-primary hover:bg-[#F3F8FF]'
               "
               @dragover="handleDragOver"
               @dragleave="handleDragLeave"

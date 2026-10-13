@@ -27,6 +27,15 @@ export type Toast = {
    * the plain success/error glyphs.
    */
   notification?: Notification
+  /**
+   * How long this toast will live, in ms. 0 means it stays until something
+   * dismisses it.
+   *
+   * Resolved here rather than recomputed by the view: the countdown bar has to
+   * run for exactly as long as the timer that removes the toast, and two
+   * places deriving the same number is how they drift apart.
+   */
+  duration: number
 }
 
 /**
@@ -70,12 +79,23 @@ function showToast(
 ) {
   const { type = 'success', title, duration, to, notifId, notification } = options
   const id = nextId++
-  toasts.value.push({ id, type, title, message, to, notifId, notification })
 
   // `??` rather than a default parameter, so an explicit `duration: 0` still
   // means "keep it up until something dismisses it" instead of falling through
   // to the computed value.
   const timeout = duration ?? toastDuration(`${title ?? ''}${message}`)
+
+  toasts.value.push({
+    id,
+    type,
+    title,
+    message,
+    to,
+    notifId,
+    notification,
+    duration: timeout,
+  })
+
   if (timeout > 0) setTimeout(() => dismissToast(id), timeout)
   return id
 }

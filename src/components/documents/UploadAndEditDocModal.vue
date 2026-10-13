@@ -10,6 +10,7 @@ import SelectDropdown from '@/components/base/SelectDropdown.vue'
 import ChipButton from '@/components/base/ChipButton.vue'
 import AudiencePicker from '@/components/documents/AudiencePicker.vue'
 import DateField from '@/components/base/DateField.vue'
+import TimeField from '@/components/base/TimeField.vue'
 import FileTypeIcon from '@/components/base/FileTypeIcon.vue'
 import RingSpinner from '@/components/base/RingSpinner.vue'
 import ConfirmChangesModal, { type FieldChange } from '@/components/base/ConfirmChangesModal.vue'
@@ -22,6 +23,11 @@ import {
   yearLevelsForMajor,
   isImageFile,
   coversEveryAudiencePair,
+  formatExpiry,
+  isoToDateAndTime,
+  dateAndTimeToIso,
+  formatFileSize,
+  audienceLabel as sharedAudienceLabel,
 } from '@/utils/format'
 
 const docs = useDocumentsStore()
@@ -30,7 +36,22 @@ const subjects = useSubjectsStore()
 const { t } = useI18n({ useScope: 'global' })
 const { showToast } = useToast()
 
+/** Mirrors UPLOAD_LIMITS on the server — see backend/src/common/upload-limits.ts. */
+const MAX_FILE_MB = 50
+const MAX_FILE_SIZE_BYTES = MAX_FILE_MB * 1024 * 1024
+
 const emit = defineEmits<{ (e: 'close'): void; (e: 'uploaded'): void }>()
+
+/**
+ * The default expiry time, and what an expiry means when nobody sets one.
+ *
+ * End of the chosen day, so "expires on the 11th" still lasts through the 11th
+ * — the behaviour from before expiry carried a time at all. Anyone who wants it
+ * gone at 9am now says so; everyone else is unaffected.
+ *
+ * Declared above the form because the form's initial state reads it.
+ */
+const END_OF_DAY = '23:59'
 
 // When present, the modal edits this upload's metadata instead of creating one.
 const props = defineProps<{
@@ -93,8 +114,10 @@ const form = reactive({
   // Who can see this, as (department, year) pairs — picked one at a time.
   // Empty = no restriction.
   audience: [] as AudienceEntry[],
-  // Soft expiry as a datetime-local string ('YYYY-MM-DDTHH:mm'); '' = never.
+  // Soft expiry, split across the two inputs: 'YYYY-MM-DD' and 'HH:mm'.
+  // An empty date means never; the time only matters once a date is set.
   expires_at: '',
+  expires_time: END_OF_DAY,
   // Optional free-text description (replaced tags).
   description: '',
 })
@@ -145,10 +168,9 @@ function isoToDateInput(iso: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-// A chosen date expires at the END of that local day, so the document stays
-// visible through the whole day. '' → null.
-function expiryToIso(date: string): string | null {
-  return date ? new Date(`${date}T23:59:59`).toISOString() : null
+/** The two inputs as one instant. '' date → null (never expires). */
+function expiryToIso(date: string, time: string): string | null {
+  return dateAndTimeToIso(date, time || END_OF_DAY)
 }
 
 // Expiry can't be set in the past.
@@ -177,6 +199,7 @@ const expiryChosen = ref(isEditing.value)
 
 function chooseNever() {
   form.expires_at = ''
+  form.expires_time = END_OF_DAY
   showCustomDate.value = false
   expiryChosen.value = true
   errors.expires_at = ''
@@ -189,12 +212,18 @@ function onExpiryDateChange(value: string) {
 
 // A preset is "active" when it's the chosen expiry and the custom picker is closed.
 function isPresetActive(days: number): boolean {
-  return !showCustomDate.value && form.expires_at === presetDate(days)
+  return (
+    !showCustomDate.value &&
+    form.expires_at === presetDate(days) &&
+    form.expires_time === END_OF_DAY
+  )
 }
 
 // Picking a preset selects it and collapses the custom picker.
 function setExpiryInDays(days: number) {
   form.expires_at = presetDate(days)
+  // A preset means "N days from now", which ends at the close of that day.
+  form.expires_time = END_OF_DAY
   showCustomDate.value = false
   expiryChosen.value = true
   errors.expires_at = ''
@@ -204,35 +233,35 @@ function setExpiryInDays(days: number) {
 // date (dd/mm/yyyy) rather than carrying over a preset's calculated date.
 function toggleCustomDate() {
   showCustomDate.value = !showCustomDate.value
-  if (showCustomDate.value) form.expires_at = ''
+  if (showCustomDate.value) {
+    form.expires_at = ''
+    form.expires_time = END_OF_DAY
+  }
 }
 
 // The expiry this upload already had, so editing something else on a doc that
 // has already expired doesn't force the owner to extend it too. Only a CHANGED
 // date has to land in the future — the API applies the same rule.
-const originalExpiresAt = isoToDateInput(props.editDoc?.expires_at)
+const originalExpiresAt = isoToDateAndTime(props.editDoc?.expires_at)
 
 // The `min` on the date input is only a hint — it can be edited away in the
 // browser — so the chosen date is re-checked here (and again on the server).
 // A date expires at the END of its local day, so today is still in the future.
 function validateExpiry(): string {
   if (!form.expires_at) return '' // '' = never expires
-  if (form.expires_at === originalExpiresAt) return ''
-  const end = new Date(`${form.expires_at}T23:59:59`)
-  if (Number.isNaN(end.getTime())) return t('document.documentUploadModal.errorExpiryInvalid')
-  if (end.getTime() <= Date.now()) return t('document.documentUploadModal.errorExpiryPast')
+  // Unchanged from what was saved: editing the title of an already-expired
+  // upload must not force the owner to extend it as well.
+  if (form.expires_at === originalExpiresAt.date && form.expires_time === originalExpiresAt.time)
+    return ''
+  const iso = expiryToIso(form.expires_at, form.expires_time)
+  if (!iso) return t('document.documentUploadModal.errorExpiryInvalid')
+  if (new Date(iso).getTime() <= Date.now())
+    return t('document.documentUploadModal.errorExpiryPast')
   return ''
 }
 
 // Human-readable form of the currently selected expiry ('' → null).
-const expirySummary = computed(() => {
-  if (!form.expires_at) return null
-  return new Date(`${form.expires_at}T23:59:59`).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  })
-})
+const expirySummary = computed(() => formatExpiry(expiryToIso(form.expires_at, form.expires_time)))
 
 // The custom date picker is shown by default; the "+" chip toggles it (collapse
 // to rely on the presets, reopen to pick a specific date).
@@ -253,7 +282,8 @@ if (props.editDoc) {
   form.academic_year = d.academic_year ?? ''
   form.subject_id = d.subjects?.id ?? ''
   form.audience = [...(d.audience ?? [])]
-  form.expires_at = isoToDateInput(d.expires_at)
+  form.expires_at = originalExpiresAt.date
+  form.expires_time = originalExpiresAt.time || END_OF_DAY
   form.description = d.description ?? ''
   // Let the guarded watchers flush (fetching subjects) before re-enabling resets.
   void nextTick().then(() => {
@@ -519,10 +549,33 @@ function collectChanges(): FieldChange[] {
     doc.description ?? '',
     form.description.trim(),
   )
+  /**
+   * Who it reaches. Was missing entirely, so narrowing a document from
+   * "Everyone" to one cohort — the change with the largest effect on who can
+   * read it — was the one change the confirmation never mentioned.
+   *
+   * Compared as the rendered label rather than the raw pairs: the reader is
+   * being asked about "I3-GIC, I4-GIC", and reordering the same pairs is not
+   * a change worth stopping them for.
+   */
+  const audienceNames = (entries: AudienceEntry[] | null | undefined) =>
+    sharedAudienceLabel(entries, majors.majors, t('document.documentUploadModal.audienceEveryone'))
+  add(
+    t('document.documentUploadModal.audienceMajorLabel'),
+    audienceNames(doc.audience),
+    audienceNames(form.audience),
+  )
+
+  /**
+   * Expiry, including the TIME. This compared dates only, so moving an expiry
+   * from 23:59 to 09:00 on the same day reported no change at all — and with
+   * no changes the dialog never opened, so the edit saved silently.
+   */
   add(
     t('document.documentUploadModal.expiresLabel'),
-    isoToDateInput(doc.expires_at) || t('common.confirmChanges.never'),
-    form.expires_at || t('common.confirmChanges.never'),
+    formatExpiry(doc.expires_at) ?? t('common.confirmChanges.never'),
+    formatExpiry(expiryToIso(form.expires_at, form.expires_time)) ??
+      t('common.confirmChanges.never'),
   )
 
   // Files are counted rather than listed: the tiles above already show which.
@@ -542,8 +595,31 @@ function collectChanges(): FieldChange[] {
   return changes
 }
 
+/**
+ * The form's scrolling body — the errors live inside it.
+ *
+ * Submitting used to `return` on a failed validation and say nothing. Half
+ * this form is below the fold, so a missing file or title set an error the
+ * reader could not see and the button simply appeared dead. Nothing was
+ * broken; the explanation was just off-screen.
+ */
+const body = ref<HTMLElement | null>(null)
+
+async function revealFirstError() {
+  await nextTick()
+  // DOM order is field order, so the first error message is the topmost one.
+  body.value?.querySelector('.text-red-600')?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'center',
+  })
+}
+
 function submit() {
-  if (!validate()) return
+  if (!validate()) {
+    showToast(t('common.toast.fixFields'), { type: 'error' })
+    void revealFirstError()
+    return
+  }
   if (isEditing.value) {
     const changes = collectChanges()
     if (changes.length) {
@@ -568,7 +644,7 @@ async function save() {
         major_id: form.major_id,
         subject_id: form.subject_id || null,
         audience: form.audience,
-        expires_at: expiryToIso(form.expires_at),
+        expires_at: expiryToIso(form.expires_at, form.expires_time),
         description: form.description.trim() || null,
       })
       // Add first so removing the old files never trips the "keep ≥1 file" guard.
@@ -602,7 +678,8 @@ async function save() {
   formData.append('major_id', form.major_id)
   if (form.subject_id) formData.append('subject_id', form.subject_id)
   formData.append('audience', JSON.stringify(form.audience))
-  if (form.expires_at) formData.append('expires_at', expiryToIso(form.expires_at)!)
+  if (form.expires_at)
+    formData.append('expires_at', expiryToIso(form.expires_at, form.expires_time)!)
   if (form.description.trim()) formData.append('description', form.description.trim())
 
   try {
@@ -676,6 +753,27 @@ function retryStagedItem(item: StagedItem) {
 function stageFiles(files: File[]) {
   if (!files.length) return
   errors.file = ''
+
+  /**
+   * Refuse an oversize file HERE, before a byte is sent.
+   *
+   * The server enforces the same cap, but only after the whole file has been
+   * uploaded — so a 300 MB pick used to mean a long progress bar and then a
+   * failure. Catching it on the client makes the answer instant, and the
+   * message can name the file's actual size, which is what tells the reader
+   * whether to compress it or split it.
+   */
+  const tooBig = files.filter((f) => f.size > MAX_FILE_SIZE_BYTES)
+  if (tooBig.length) {
+    errors.file = t('document.documentUploadModal.errorFileTooLarge', {
+      name: tooBig[0]!.name,
+      size: formatFileSize(Math.round(tooBig[0]!.size / 1024)),
+      max: `${MAX_FILE_MB} MB`,
+    })
+    files = files.filter((f) => f.size <= MAX_FILE_SIZE_BYTES)
+    if (!files.length) return
+  }
+
   const seen = new Set(stagedItems.value.map((i) => `${i.name}-${i.sizeKb}`))
   const firstFile = files[0]
   if (files.length === 1 && firstFile && !form.title) {
@@ -869,7 +967,7 @@ restoreDraft()
       </div>
 
       <!-- Scrollable form body -->
-      <div class="min-h-0 flex-1 space-y-3 overflow-y-auto scrollbar-hide px-5 py-4">
+      <div ref="body" class="min-h-0 flex-1 space-y-3 overflow-y-auto scrollbar-hide px-5 py-4">
         <!-- Server error -->
         <p v-if="docs.error" class="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-600">
           {{ docs.error }}
@@ -1331,30 +1429,58 @@ restoreDraft()
             </ChipButton>
           </div>
 
-          <DateField
-            v-if="showCustomDate"
-            v-model="form.expires_at"
-            :min="todayStr"
-            @update:model-value="onExpiryDateChange"
-          />
+          <!-- Date and time side by side from sm up, stacked on a phone. The
+               time only appears once there is a date to attach it to: a time
+               with no date expires nothing, and an input that cannot do
+               anything yet is a question the reader has to dismiss. -->
+          <div v-if="showCustomDate" class="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-start">
+            <div class="space-y-1">
+              <span class="text-xs text-gray-500">
+                {{ t('document.documentUploadModal.expiresDateLabel') }}
+              </span>
+              <DateField
+                v-model="form.expires_at"
+                :min="todayStr"
+                @update:model-value="onExpiryDateChange"
+              />
+            </div>
+
+            <div v-if="form.expires_at" class="space-y-1 sm:w-40">
+              <span class="text-xs text-gray-500">
+                {{ t('document.documentUploadModal.expiresTimeLabel') }}
+              </span>
+              <TimeField v-model="form.expires_time" />
+            </div>
+          </div>
 
           <p v-if="errors.expires_at" class="text-sm text-red-600">{{ errors.expires_at }}</p>
 
-          <!-- Editing always states the expiry in words, "Never" included —
-               a highlighted chip alone doesn't read as the current value. -->
+          <!-- The chosen expiry in words, weekday and time included. Always
+               shown once a choice exists — "Never" too, because a highlighted
+               chip alone does not read as the current value, and dd/mm/yyyy in
+               a box does not read as a day of the week. -->
           <p
-            v-if="isEditing"
-            class="text-xs"
+            v-if="isEditing || expiryChosen"
+            class="flex items-center gap-1.5 text-xs"
             :class="expirySummary ? 'text-primary' : 'text-gray-500'"
           >
-            {{
-              t('document.documentUploadModal.expiresCurrent', {
-                value: expirySummary ?? t('document.documentUploadModal.expiresNeverValue'),
-              })
-            }}
-          </p>
-          <p v-else-if="expirySummary" class="text-xs text-primary">
-            {{ t('document.documentUploadModal.expiresSummary', { date: expirySummary }) }}
+            <svg
+              class="h-3.5 w-3.5 shrink-0"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              viewBox="0 0 24 24"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
+            </svg>
+            <span>
+              {{
+                t('document.documentUploadModal.expiresCurrent', {
+                  value: expirySummary ?? t('document.documentUploadModal.expiresNeverValue'),
+                })
+              }}
+            </span>
           </p>
         </div>
 

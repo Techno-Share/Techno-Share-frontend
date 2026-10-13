@@ -248,7 +248,6 @@ async function onUploaded() {
               v-for="entry in groupedDocs"
               :key="entry.doc.id"
               :doc="entry.doc"
-              :file-count="entry.count"
               @deleted="loadDocs()"
               @hidden-changed="loadDocs()"
               @pinned-changed="loadDocs()"
@@ -285,6 +284,7 @@ async function onUploaded() {
               @deleted="loadDocs()"
               @hidden-changed="loadDocs()"
               @pinned-changed="loadDocs()"
+              @edit="openEdit"
             />
           </div>
         </div>

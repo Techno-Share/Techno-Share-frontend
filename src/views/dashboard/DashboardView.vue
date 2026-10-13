@@ -32,9 +32,8 @@ const FILLS_COLUMN = [
   'dashboard',
   'dashboard-documents',
   'profile',
-  // The review queues scroll inside their own panel, so the column has to stop
+  // The review queue scrolls inside its own panel, so the column has to stop
   // growing for there to be an overflow at all.
-  'dashboard-review-subjects',
   'dashboard-review-documents',
   'dashboard-review-files',
 ]

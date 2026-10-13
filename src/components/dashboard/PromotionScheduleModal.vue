@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import RingSpinner from '@/components/base/RingSpinner.vue'
+import DateField from '@/components/base/DateField.vue'
+import TimeField from '@/components/base/TimeField.vue'
+import { dateAndTimeToIso, formatExpiry, isoToDateAndTime } from '@/utils/format'
 
 /**
  * Picks the date the whole institute moves up a year.
@@ -20,32 +23,30 @@ const emit = defineEmits<{
   (e: 'save', isoOrNull: string | null): void
 }>()
 
-/** `datetime-local` speaks local wall-clock with no zone, so convert both ways. */
-function toLocalInput(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
+/**
+ * The same DateField + TimeField the upload form uses, rather than a native
+ * `datetime-local`.
+ *
+ * This was the last browser-drawn picker in the app: it looked nothing like the
+ * rest of the forms, rendered differently in every browser, and Safari gave no
+ * picker at all. Splitting the instant into the two fields is the whole cost.
+ *
+ * Both halves are local wall-clock; dateAndTimeToIso puts the zone back on.
+ */
+const initial = isoToDateAndTime(props.currentAt)
+const date = ref(initial.date)
+const time = ref(initial.time || '00:00')
 
-const value = ref(toLocalInput(props.currentAt))
-const field = ref<HTMLInputElement | null>(null)
+/** The chosen instant, or null while the date is still blank. */
+const chosenIso = computed(() => dateAndTimeToIso(date.value, time.value))
+
+/** Spelled out under the fields, so the choice is legible before committing. */
+const summary = computed(() => formatExpiry(chosenIso.value))
 
 /** A time already gone is valid — it simply takes effect at once. Say so. */
-const isPast = computed(() => !!value.value && new Date(value.value).getTime() <= Date.now())
-
-/** Opens the browser's own calendar; the native icon is hidden by the field. */
-function openPicker() {
-  const el = field.value
-  if (!el) return
-  try {
-    ;(el as HTMLInputElement & { showPicker?: () => void }).showPicker?.()
-  } catch {
-    // Some browsers refuse outside a gesture they recognise; focus still helps
-    // and the field can always be typed into.
-  }
-  el.focus()
-}
+const isPast = computed(
+  () => !!chosenIso.value && new Date(chosenIso.value).getTime() <= Date.now(),
+)
 
 function onKey(event: KeyboardEvent) {
   if (event.key === 'Escape' && !props.saving) emit('close')
@@ -69,38 +70,25 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           next visit after this moment passes.
         </p>
 
-        <label class="mt-5 block text-sm font-semibold text-gray-600" for="promotion-at">
-          Date and time
-        </label>
-        <div class="relative mt-1.5">
-          <input
-            id="promotion-at"
-            ref="field"
-            v-model="value"
-            type="datetime-local"
-            class="no-native-picker w-full rounded-xl border border-gray-200 bg-gray-50 py-3 pl-4 pr-11 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
-          />
-          <button
-            type="button"
-            aria-label="Open the date picker"
-            class="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-xl text-gray-400 transition hover:cursor-pointer hover:text-primary"
-            @click="openPicker"
-          >
-            <svg
-              class="h-5 w-5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
-              />
-            </svg>
-          </button>
+        <label class="mt-5 block text-sm font-semibold text-gray-600">Date and time</label>
+        <div class="mt-1.5 grid gap-2 sm:grid-cols-[1fr_auto] sm:items-start">
+          <DateField v-model="date" />
+          <div class="sm:w-40"><TimeField v-model="time" /></div>
         </div>
+
+        <p v-if="summary" class="mt-2 flex items-center gap-1.5 text-xs text-primary">
+          <svg
+            class="h-3.5 w-3.5 shrink-0"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+          >
+            <circle cx="12" cy="12" r="9" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
+          </svg>
+          <span>Promotes on {{ summary }}</span>
+        </p>
 
         <p v-if="isPast" class="mt-2 text-xs text-amber-600">
           That time has already passed — it will take effect immediately.
@@ -109,9 +97,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
         <div class="mt-6 flex flex-col gap-2">
           <button
             type="button"
-            :disabled="props.saving || !value"
+            :disabled="props.saving || !chosenIso"
             class="flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-white transition hover:cursor-pointer hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-            @click="emit('save', new Date(value).toISOString())"
+            @click="emit('save', chosenIso)"
           >
             <RingSpinner v-if="props.saving" :size="16" :stroke="3" />
             Schedule

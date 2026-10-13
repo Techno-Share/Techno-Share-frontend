@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import PasswordField from '@/components/base/PasswordField.vue'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth.store'
 import CodeInput from '@/components/base/CodeInput.vue'
@@ -220,14 +221,14 @@ async function submit(e: Event) {
             <label for="new-password" class="text-sm font-semibold text-gray-600">{{
               t('auth.reset.password')
             }}</label>
-            <input
-              id="new-password"
+            <PasswordField
               v-model="password"
-              @blur="validateNew"
-              type="password"
+              id="new-password"
               autocomplete="new-password"
               :placeholder="t('auth.reset.yourPassword')"
-              class="mt-1.5 w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+              wrapper-class="mt-1.5"
+              class="w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+              @blur="validateNew"
             />
             <p v-if="fieldErrors.password" class="mt-1 text-sm text-red-500">
               {{ t(fieldErrors.password) }}
@@ -238,14 +239,14 @@ async function submit(e: Event) {
             <label for="confirm-password" class="text-sm font-semibold text-gray-600">{{
               t('auth.reset.confirm')
             }}</label>
-            <input
-              id="confirm-password"
+            <PasswordField
               v-model="confirm"
-              @blur="validateNew"
-              type="password"
+              id="confirm-password"
               autocomplete="new-password"
               :placeholder="t('auth.reset.confirmPassword')"
-              class="mt-1.5 w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+              wrapper-class="mt-1.5"
+              class="w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+              @blur="validateNew"
             />
             <p v-if="fieldErrors.confirm" class="mt-1 text-sm text-red-500">
               {{ t(fieldErrors.confirm) }}

@@ -3,8 +3,15 @@
 
 import type { MajorRef } from '@/types/major.types'
 
-/** Enforced by a CHECK constraint on `subjects.status`. */
-export type SubjectStatus = 'pending' | 'active' | 'rejected'
+/**
+ * Enforced by a CHECK constraint on `subjects.status`.
+ *
+ * Only 'active' is ever written now — subjects have no review, so one is live
+ * the moment its department's moderator creates it. 'pending' survives for
+ * rows left mid-review when that was removed; the constraint still permits
+ * 'rejected' too, but nothing can produce it.
+ */
+export type SubjectStatus = 'pending' | 'active'
 
 export interface SubjectRef {
   id: string
@@ -30,11 +37,14 @@ export interface Subject {
   subject_url: string | null
 }
 
-/** `GET /subjects/mine` — carries moderation fields and the owning major. */
+/**
+ * `GET /subjects/mine` — the caller's own leftover submissions.
+ *
+ * Returns only rows still marked 'pending', which no longer happens: these are
+ * subjects that were awaiting review when review was removed.
+ */
 export interface MySubject extends Subject {
   status: SubjectStatus
-  rejection_reason: string | null
-  rejected_at: string | null
   created_at: string
   majors: MajorRef | null
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth.store'
 import { useDocumentsStore } from '@/stores/documents.store'
 import { useMajorsStore } from '@/stores/majors.store'
@@ -9,6 +9,7 @@ import SelectDropdown from '@/components/base/SelectDropdown.vue'
 import ChipButton from '@/components/base/ChipButton.vue'
 import AudiencePicker from '@/components/documents/AudiencePicker.vue'
 import DateField from '@/components/base/DateField.vue'
+import TimeField from '@/components/base/TimeField.vue'
 import RingSpinner from '@/components/base/RingSpinner.vue'
 import FileTypeIcon from '@/components/base/FileTypeIcon.vue'
 import type { AudienceEntry } from '@/types/documents.types'
@@ -22,6 +23,9 @@ import {
   languageLabelKey,
   yearLevelsForMajor,
   coversEveryAudiencePair,
+  formatExpiry,
+  dateAndTimeToIso,
+  formatFileSize,
 } from '@/utils/format'
 
 const auth = useAuthStore()
@@ -30,6 +34,17 @@ const majors = useMajorsStore()
 const subjects = useSubjectsStore()
 const { t } = useI18n({ useScope: 'global' })
 const { showToast } = useToast()
+
+/** Mirrors UPLOAD_LIMITS on the server — see backend/src/common/upload-limits.ts. */
+const MAX_FILE_MB = 50
+const MAX_FILE_SIZE_BYTES = MAX_FILE_MB * 1024 * 1024
+
+/**
+ * The default expiry time: end of the chosen day, so "expires on the 11th"
+ * still lasts through the 11th — the behaviour from before expiry carried a
+ * time. Declared above the form, whose initial state reads it.
+ */
+const END_OF_DAY = '23:59'
 
 const emit = defineEmits<{ (e: 'close'): void; (e: 'uploaded'): void }>()
 
@@ -102,8 +117,10 @@ const form = reactive({
   // Who can see this, as (department, year) pairs — picked one at a time.
   // Empty = no restriction.
   audience: [] as AudienceEntry[],
-  // Soft expiry as a datetime-local string ('YYYY-MM-DDTHH:mm'); '' = never.
+  // Soft expiry, split across the two inputs: 'YYYY-MM-DD' and 'HH:mm'.
+  // An empty date means never; the time only matters once a date is set.
   expires_at: '',
+  expires_time: END_OF_DAY,
   // Optional free-text description (replaced tags).
   description: '',
 })
@@ -411,6 +428,7 @@ const expiryChosen = ref(false)
 
 function chooseNever() {
   form.expires_at = ''
+  form.expires_time = END_OF_DAY
   showCustomDate.value = false
   expiryChosen.value = true
   errors.expires_at = ''
@@ -423,12 +441,18 @@ function onExpiryDateChange(value: string) {
 
 // A preset is "active" when it's the chosen expiry and the custom picker is closed.
 function isPresetActive(days: number): boolean {
-  return !showCustomDate.value && form.expires_at === presetDate(days)
+  return (
+    !showCustomDate.value &&
+    form.expires_at === presetDate(days) &&
+    form.expires_time === END_OF_DAY
+  )
 }
 
 // Picking a preset selects it and collapses the custom picker.
 function setExpiryInDays(days: number) {
   form.expires_at = presetDate(days)
+  // A preset means "N days from now", which ends at the close of that day.
+  form.expires_time = END_OF_DAY
   showCustomDate.value = false
   expiryChosen.value = true
   errors.expires_at = ''
@@ -438,7 +462,10 @@ function setExpiryInDays(days: number) {
 // date (dd/mm/yyyy) rather than carrying over a preset's calculated date.
 function toggleCustomDate() {
   showCustomDate.value = !showCustomDate.value
-  if (showCustomDate.value) form.expires_at = ''
+  if (showCustomDate.value) {
+    form.expires_at = ''
+    form.expires_time = END_OF_DAY
+  }
 }
 
 // The `min` on the date input is only a hint — it can be edited away in the
@@ -446,20 +473,16 @@ function toggleCustomDate() {
 // A date expires at the END of its local day, so today is still in the future.
 function validateExpiry(): string {
   if (!form.expires_at) return '' // '' = never expires
-  const end = new Date(`${form.expires_at}T23:59:59`)
-  if (Number.isNaN(end.getTime())) return t('document.documentUploadModal.errorExpiryInvalid')
-  if (end.getTime() <= Date.now()) return t('document.documentUploadModal.errorExpiryPast')
+  const iso = dateAndTimeToIso(form.expires_at, form.expires_time)
+  if (!iso) return t('document.documentUploadModal.errorExpiryInvalid')
+  if (new Date(iso).getTime() <= Date.now())
+    return t('document.documentUploadModal.errorExpiryPast')
   return ''
 }
 
-const expirySummary = computed(() => {
-  if (!form.expires_at) return null
-  return new Date(`${form.expires_at}T23:59:59`).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  })
-})
+const expirySummary = computed(() =>
+  formatExpiry(dateAndTimeToIso(form.expires_at, form.expires_time)),
+)
 
 // Initialise
 docs.fetchDocTypes()
@@ -471,6 +494,26 @@ if (form.major_id) subjects.fetchByMajorAndYear(form.major_id, 0)
 function stageFiles(files: File[]) {
   if (!files.length) return
   errors.file = ''
+
+  /**
+   * Refuse an oversize file HERE, before a byte is sent.
+   *
+   * The server enforces the same cap, but only after the whole file has been
+   * uploaded — so a 300 MB pick used to mean a long progress bar and then a
+   * failure. Catching it on the client makes the answer instant, and the
+   * message can name the file's actual size, which is what tells the reader
+   * whether to compress it or split it.
+   */
+  const tooBig = files.filter((f) => f.size > MAX_FILE_SIZE_BYTES)
+  if (tooBig.length) {
+    errors.file = t('document.documentUploadModal.errorFileTooLarge', {
+      name: tooBig[0]!.name,
+      size: formatFileSize(Math.round(tooBig[0]!.size / 1024)),
+      max: `${MAX_FILE_MB} MB`,
+    })
+    files = files.filter((f) => f.size <= MAX_FILE_SIZE_BYTES)
+    if (!files.length) return
+  }
 
   const seen = new Set(stagedItems.value.map((i) => `${i.name}-${i.sizeKb}`))
   const firstFile = files[0]
@@ -654,8 +697,29 @@ function validateAcademicYear(value: string): string {
   return ''
 }
 
+/**
+ * The form's scrolling body — the errors live inside it.
+ *
+ * Submitting used to `return` on a failed validation and say nothing. Half
+ * this form is below the fold, so a missing file or title set an error the
+ * reader could not see and the button simply appeared dead. Nothing was
+ * broken; the explanation was just off-screen.
+ */
+const body = ref<HTMLElement | null>(null)
+
+async function revealFirstError() {
+  await nextTick()
+  // DOM order is field order, so the first error message is the topmost one.
+  const first = body.value?.querySelector('.text-red-600')
+  first?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
 async function submit() {
-  if (!validate()) return
+  if (!validate()) {
+    showToast(t('common.toast.fixFields'), { type: 'error' })
+    void revealFirstError()
+    return
+  }
 
   // The bytes are already on the server — send the handles.
   const formData = new FormData()
@@ -669,7 +733,7 @@ async function submit() {
   formData.append('audience', JSON.stringify(form.audience))
   // A chosen date expires at the END of that local day.
   if (form.expires_at)
-    formData.append('expires_at', new Date(`${form.expires_at}T23:59:59`).toISOString())
+    formData.append('expires_at', dateAndTimeToIso(form.expires_at, form.expires_time)!)
   if (form.description.trim()) formData.append('description', form.description.trim())
 
   try {
@@ -727,7 +791,7 @@ async function submit() {
       </div>
 
       <!-- Scrollable form body -->
-      <div class="min-h-0 flex-1 space-y-3 overflow-y-auto scrollbar-hide px-5 py-4">
+      <div ref="body" class="min-h-0 flex-1 space-y-3 overflow-y-auto scrollbar-hide px-5 py-4">
         <!-- Server error -->
         <p v-if="docs.error" class="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-600">
           {{ docs.error }}
@@ -1133,17 +1197,52 @@ async function submit() {
             </ChipButton>
           </div>
 
-          <DateField
-            v-if="showCustomDate"
-            v-model="form.expires_at"
-            :min="todayStr"
-            @update:model-value="onExpiryDateChange"
-          />
+          <!-- Date and time side by side from sm up. The time only appears
+               once there is a date to attach it to. -->
+          <div v-if="showCustomDate" class="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-start">
+            <div class="space-y-1">
+              <span class="text-xs text-gray-500">
+                {{ t('document.documentUploadModal.expiresDateLabel') }}
+              </span>
+              <DateField
+                v-model="form.expires_at"
+                :min="todayStr"
+                @update:model-value="onExpiryDateChange"
+              />
+            </div>
+
+            <div v-if="form.expires_at" class="space-y-1 sm:w-40">
+              <span class="text-xs text-gray-500">
+                {{ t('document.documentUploadModal.expiresTimeLabel') }}
+              </span>
+              <TimeField v-model="form.expires_time" />
+            </div>
+          </div>
 
           <p v-if="errors.expires_at" class="text-sm text-red-600">{{ errors.expires_at }}</p>
 
-          <p v-if="expirySummary" class="text-xs text-primary">
-            {{ t('document.documentUploadModal.expiresSummary', { date: expirySummary }) }}
+          <p
+            v-if="expiryChosen"
+            class="flex items-center gap-1.5 text-xs"
+            :class="expirySummary ? 'text-primary' : 'text-gray-500'"
+          >
+            <svg
+              class="h-3.5 w-3.5 shrink-0"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              viewBox="0 0 24 24"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
+            </svg>
+            <span>
+              {{
+                t('document.documentUploadModal.expiresCurrent', {
+                  value: expirySummary ?? t('document.documentUploadModal.expiresNeverValue'),
+                })
+              }}
+            </span>
           </p>
         </div>
 

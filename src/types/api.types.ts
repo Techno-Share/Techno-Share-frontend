@@ -7,9 +7,13 @@
 // here, so the compiler makes us handle it at the point of use.
 
 /**
- * A paginated list response. `total` is the full filtered count (not just the
- * current page), so a pager can derive its page count. Endpoints paginate only
- * when a `limit` is passed; without one, `items` holds every match.
+ * A paginated list response. `total` is the full filtered count — every row
+ * matching the search and filters, not just the ones on this page — so a pager
+ * can derive its page count without a second request.
+ *
+ * The admin list endpoints (`/admin/users`, `/admin/documents`,
+ * `/admin/subjects`) always paginate: omitting `limit` yields the server's
+ * default page, never the whole table.
  */
 export interface Paginated<T> {
   items: T[]

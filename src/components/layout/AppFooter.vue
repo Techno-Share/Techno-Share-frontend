@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import logoUrl from '@/assets/images/techno_share_logo_trimmed.png'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -62,11 +63,8 @@ const socials = [
     >
       <!-- Identity -->
       <div class="flex flex-col items-center gap-2 md:items-start">
-        <router-link
-          to="/"
-          class="text-xl font-bold text-gray-900 transition hover:text-primary hover:cursor-pointer"
-        >
-          Logo
+        <router-link to="/" class="transition hover:opacity-80 hover:cursor-pointer">
+          <img :src="logoUrl" alt="ITC Sharing" class="h-10 w-auto object-contain" />
         </router-link>
         <p class="text-xs text-gray-400">
           {{ t('common.footer.copyright', { year }) }} {{ t('common.footer.rights') }}

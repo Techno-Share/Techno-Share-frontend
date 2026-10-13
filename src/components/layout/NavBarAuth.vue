@@ -3,7 +3,9 @@
     <div class="max-w-7xl mx-auto px-6">
       <div class="flex items-center justify-between py-4">
         <!-- Logo -->
-        <router-link to="/" class="text-xl font-bold"> Logo </router-link>
+        <router-link to="/">
+          <img :src="logoUrl" alt="ITC Sharing" class="h-9 w-auto object-contain" />
+        </router-link>
 
         <!-- Language switch -->
         <button
@@ -29,6 +31,7 @@
   </nav>
 </template>
 <script setup lang="ts">
+import logoUrl from '@/assets/images/techno_share_logo_trimmed.png'
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 

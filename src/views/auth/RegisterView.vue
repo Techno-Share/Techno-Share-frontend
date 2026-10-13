@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
+import PasswordField from '@/components/base/PasswordField.vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '../../stores/auth.store'
@@ -284,13 +285,13 @@ async function resend() {
           <label class="text-sm font-semibold text-gray-600">{{
             t('auth.register.password')
           }}</label>
-          <input
+          <PasswordField
             v-model="form.password"
-            @blur="validatePassword"
-            type="password"
             autocomplete="new-password"
-            class="mt-1.5 w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
             :placeholder="t('auth.register.enterPassword')"
+            wrapper-class="mt-1.5"
+            class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
+            @blur="validatePassword"
           />
           <p v-if="errors.password" class="mt-1.5 text-sm text-red-500">{{ t(errors.password) }}</p>
         </div>
@@ -299,13 +300,13 @@ async function resend() {
           <label class="text-sm font-semibold text-gray-600">{{
             t('auth.register.confirmPassword')
           }}</label>
-          <input
+          <PasswordField
             v-model="form.confirmPassword"
-            @blur="validateConfirmPassword"
-            type="password"
             autocomplete="new-password"
-            class="mt-1.5 w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
             :placeholder="t('auth.register.enterConfirmPassword')"
+            wrapper-class="mt-1.5"
+            class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
+            @blur="validateConfirmPassword"
           />
           <p v-if="errors.confirmPassword" class="mt-1.5 text-sm text-red-500">
             {{ t(errors.confirmPassword) }}

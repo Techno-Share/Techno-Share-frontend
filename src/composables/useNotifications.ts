@@ -51,11 +51,25 @@ export function notificationRoute(n: Notification): RouteLocationRaw {
   if (n.type === 'document_pending' && n.ref_id) {
     return { name: 'admin-review', params: { groupId: n.ref_id } }
   }
-  if (n.type === 'subject_pending') {
-    return { name: 'admin', query: { tab: 'approvals' } }
-  }
+  // No subject_pending route: subjects have no review queue any more. Rows
+  // written before that change fall through to the detail page, which still
+  // renders them — removing the destination must not strand old notifications.
 
-  if (n.type.includes('approved') && n.ref_type === 'document' && n.ref_id) {
+  /**
+   * Anything about one of your own documents opens that document.
+   *
+   * Approvals went here and rejections did not, which put the two halves of the
+   * same decision on different screens: approved took you to the document,
+   * rejected to a page that restated the notification you had just read. The
+   * document's own page carries the reason now, in the banner and the title
+   * badge, and it is also where the problem can actually be dealt with — the
+   * file replaced, or the submission deleted.
+   *
+   * `ref_id` is the UPLOAD id for file-level notifications too (see
+   * AdminService.rejectFile), so a rejected added-file lands on the folder that
+   * holds it rather than nowhere.
+   */
+  if (n.ref_type === 'document' && n.ref_id) {
     return { name: 'document-details', query: { upload_id: n.ref_id } }
   }
 

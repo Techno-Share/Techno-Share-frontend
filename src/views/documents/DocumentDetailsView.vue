@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/auth.store'
 import { useDocumentsStore } from '@/stores/documents.store'
 import * as documentsApi from '@/services/documents.api'
 import { useMajorsStore } from '@/stores/majors.store'
-import { yearMajorLabel } from '@/utils/format'
+import { formatExpiry, formatFileSize, yearMajorLabel } from '@/utils/format'
 import { useToast } from '@/composables/useToast'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
 import FileRow from '@/components/documents/FileRow.vue'
@@ -36,6 +36,29 @@ const uploadId = computed(() => String(route.query.upload_id ?? ''))
 const canLoad = computed(() => !!uploadId.value)
 
 const upload = computed(() => docs.currentUpload)
+
+/**
+ * Hiding withdraws a file from circulation, and an upload still under review
+ * was never in any. The file rows cannot work this out alone: they are written
+ * 'active' even inside a pending upload, so each one looks publishable on its
+ * own. The server refuses it too — see DocumentsService.setFileHidden.
+ */
+const uploadPublished = computed(() => upload.value?.status === 'active')
+
+/**
+ * The upload's own review state, shown beside its title.
+ *
+ * Same labels and tones DocumentCard uses, so one document reads identically in
+ * a listing and on its own page — rather than "Under review" in grey there and
+ * "Pending review" in amber here for the same thing.
+ */
+const uploadBadge = computed(() => {
+  if (upload.value?.status === 'pending')
+    return { label: t('dashboard.documents.statusPending'), tone: 'bg-gray-200 text-gray-600' }
+  if (upload.value?.status === 'rejected')
+    return { label: t('dashboard.documents.statusRejected'), tone: 'bg-red-100 text-red-700' }
+  return null
+})
 const pageTitle = computed(() => upload.value?.title || 'Document Details')
 
 const files = computed(() => upload.value?.documents ?? [])
@@ -64,16 +87,34 @@ const audienceLabel = computed(() => {
 const expiryLabel = computed(() => {
   const at = upload.value?.expires_at
   if (!at) return t('document.documentDetailsPage.expiresNever')
-  return new Date(at).toLocaleDateString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  })
+  // Shared with the upload form and the review queue — expiry carries a time
+  // now, and three renderings of one instant is how they drift apart.
+  return formatExpiry(at) ?? t('document.documentDetailsPage.expiresNever')
 })
 
 // Served only to the uploader and admins — everyone else never sees these rows.
 const pendingFiles = computed(() => files.value.filter((f) => f.status === 'pending'))
 const rejectedFiles = computed(() => files.value.filter((f) => f.status === 'rejected'))
+
+/**
+ * The reasons behind the rejection, one line each.
+ *
+ * Rejecting an upload writes the same reason onto every one of its files, so
+ * the ordinary case is a single line and repeating it per file would just be
+ * the same sentence three times. Files can also be rejected individually, with
+ * different reasons — only then does the file name need to come back, or the
+ * lines are indistinguishable from each other.
+ */
+const rejectionReasons = computed(() => {
+  const withReason = rejectedFiles.value.filter((f) => f.rejection_reason)
+  const distinct = [...new Set(withReason.map((f) => f.rejection_reason as string))]
+
+  if (distinct.length <= 1) return distinct.map((text) => ({ key: text, text }))
+  return withReason.map((f) => ({
+    key: f.id,
+    text: `${f.original_name} — ${f.rejection_reason}`,
+  }))
+})
 const hiddenFiles = computed(() => files.value.filter((f) => f.hidden_at))
 
 /**
@@ -106,7 +147,7 @@ const isOwner = computed(() => !!auth.user?.id && auth.user.id === upload.value?
 // checked here only so an oversized pick fails instantly with a readable
 // message instead of round-tripping into a multer error.
 const MAX_FILES_PER_REQUEST = 10
-const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
 
 const showAddFiles = ref(false)
 const adding = ref(false)
@@ -129,9 +170,14 @@ async function uploadFiles(picked: File[]) {
 
   const oversized = picked.find((f) => f.size > MAX_FILE_SIZE_BYTES)
   if (oversized) {
-    showToast(t('document.documentDetailsPage.fileTooLarge', { name: oversized.name }), {
-      type: 'error',
-    })
+    showToast(
+      t('document.documentDetailsPage.fileTooLarge', {
+        name: oversized.name,
+        size: formatFileSize(Math.round(oversized.size / 1024)),
+        max: `${MAX_FILE_SIZE_BYTES / 1024 / 1024} MB`,
+      }),
+      { type: 'error' },
+    )
     return
   }
 
@@ -313,7 +359,19 @@ watch(uploadId, async (id) => {
              the toggle and the button onto a line of their own. -->
         <div class="flex items-center justify-between gap-4">
           <div>
-            <h1 class="md:text-2xl text-xl font-bold text-gray-900 capitalize">{{ pageTitle }}</h1>
+            <!-- The badge belongs to the upload, so it sits on the upload's
+                 name rather than being repeated on every file underneath. -->
+            <div class="flex flex-wrap items-center gap-2">
+              <h1 class="md:text-2xl text-xl font-bold text-gray-900 capitalize">
+                {{ pageTitle }}
+              </h1>
+              <span
+                v-if="uploadBadge"
+                class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                :class="uploadBadge.tone"
+                >{{ uploadBadge.label }}</span
+              >
+            </div>
             <p class="md:text-sm text-xs text-gray-400">
               {{ upload?.users?.first_name }} {{ upload?.users?.last_name }}
             </p>
@@ -321,8 +379,10 @@ watch(uploadId, async (id) => {
 
           <div class="flex shrink-0 items-center gap-3">
             <ViewToggle v-if="files.length" v-model="viewMode" />
+            <!-- Attaching a file to a rejected upload is an edit, and the
+                 server refuses it — see DocumentsService.addFiles. -->
             <IconTextButton
-              v-if="isOwner"
+              v-if="isOwner && upload?.status !== 'rejected'"
               :text="
                 adding
                   ? t('document.documentDetailsPage.adding', { percent: addProgress })
@@ -446,13 +506,10 @@ watch(uploadId, async (id) => {
           />
         </svg>
         <div class="text-sm text-red-800">
-          <p>{{ t('document.documentDetailsPage.filesRejected', rejectedFiles.length) }}</p>
-          <p
-            v-for="file in rejectedFiles.filter((f) => f.rejection_reason)"
-            :key="file.id"
-            class="mt-1 break-words"
-          >
-            <span class="font-medium">{{ file.original_name }}</span> — {{ file.rejection_reason }}
+          <p>{{ t('document.documentDetailsPage.documentRejected') }}</p>
+          <p v-for="reason in rejectionReasons" :key="reason.key" class="mt-1 break-words">
+            <span class="font-medium">{{ t('document.documentDetailsPage.rejectionReason') }}</span>
+            {{ reason.text }}
           </p>
         </div>
       </div>
@@ -515,6 +572,7 @@ watch(uploadId, async (id) => {
               :fallback-name="upload?.title"
               :is-last="idx === files.length - 1"
               :can-delete="isOwner"
+              :upload-published="uploadPublished"
               @preview="previewFile"
               @download="downloadFile"
               @delete="askDelete"
@@ -534,6 +592,7 @@ watch(uploadId, async (id) => {
             :file="file"
             :fallback-name="upload?.title"
             :can-delete="isOwner"
+            :upload-published="uploadPublished"
             @preview="previewFile"
             @download="downloadFile"
             @delete="askDelete"

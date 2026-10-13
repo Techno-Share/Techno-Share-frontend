@@ -1,12 +1,21 @@
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount, onMounted, watch } from 'vue'
+import { useAnchoredPanel } from '@/composables/useAnchoredPanel'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth.store'
 import { useToast } from '@/composables/useToast'
-import { yearLevelsForMajor, yearMajorLabel } from '@/utils/format'
+import { apiErrorMessage } from '@/utils/api-error'
+import {
+  audienceLabel as sharedAudienceLabel,
+  formatExpiry,
+  isExpired,
+  yearLevelsForMajor,
+  yearMajorLabel,
+} from '@/utils/format'
 import ConfirmDeleteModal from '@/components/base/ConfirmDeleteModal.vue'
 import RingSpinner from '@/components/base/RingSpinner.vue'
 import noImage from '@/assets/images/no-image.png'
+import logoUrl from '@/assets/images/techno_share_logo_trimmed.png'
 
 import FilePreviewThumb from '@/components/documents/FilePreviewThumb.vue'
 import DocumentPreviewModal from '@/components/documents/DocumentPreviewModal.vue'
@@ -14,24 +23,21 @@ import type { UploadFile } from '@/types/documents.types'
 import FolderIcon from '@/components/base/FolderIcon.vue'
 import RowActionsMenu from '@/components/base/RowActionsMenu.vue'
 import type { PreviewableFile } from '@/types/documents.types'
-import type {
-  AdminDocument,
-  AdminPendingDocument,
-  AdminPendingSubject,
-  AdminUser,
-} from '@/types/admin.types'
+import type { AdminDocument, AdminPendingDocument, AdminUser } from '@/types/admin.types'
+import type { Paginated } from '@/types/api.types'
 import Pagination from '@/components/base/Pagination.vue'
 import PageSizeSelect from '@/components/base/PageSizeSelect.vue'
 import SearchDashboard from '@/components/dashboard/SearchDashboard.vue'
 import FilterDashboard from '@/components/dashboard/FilterDashboard.vue'
 import UploadsBarChart from '@/components/documents/UploadsBarChart.vue'
+import DepartmentBarChart from '@/components/dashboard/DepartmentBarChart.vue'
+import StatusDonutChart from '@/components/dashboard/StatusDonutChart.vue'
 import CreateMajorModal from '@/components/dashboard/CreateMajorModal.vue'
 import EditSubjectModal from '@/components/dashboard/EditSubjectModal.vue'
 import api from '@/services/http'
 import * as documentsApi from '@/services/documents.api'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
 import PromotionScheduleModal from '@/components/dashboard/PromotionScheduleModal.vue'
-import SubjectReviewTable from '@/components/review/SubjectReviewTable.vue'
 import DocumentReviewTable from '@/components/review/DocumentReviewTable.vue'
 import NotificationBell from '@/components/notifications/NotificationBell.vue'
 
@@ -85,24 +91,9 @@ const activeTab = ref<Tab>(
     : 'overview',
 )
 
-// Approvals splits into two queues; the sidebar can drill into either one.
-type ApprovalSection = 'subjects' | 'documents'
-const approvalsSection = ref<ApprovalSection>('subjects')
-const approvalsOpen = ref(false)
-
-function openApprovals(section: ApprovalSection) {
-  activeTab.value = 'approvals'
-  approvalsSection.value = section
-  approvalsOpen.value = true
-}
-
-function toggleApprovals() {
-  if (activeTab.value === 'approvals' && approvalsOpen.value) {
-    approvalsOpen.value = false
-    return
-  }
-  openApprovals('subjects')
-}
+// Approvals is one queue — documents. It used to split into Subjects and
+// Documents, with the sidebar entry expanding to drill into either; subjects
+// are no longer reviewed, so the entry selects the tab like every other one.
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 const stats = ref({
@@ -111,6 +102,8 @@ const stats = ref({
   totalSubjects: 0,
   totalBooks: 0,
   uploadsByMonth: [] as { month: string; count: number }[],
+  documentsByDepartment: [] as { acronym: string; count: number }[],
+  documentsByStatus: [] as { status: string; count: number }[],
 })
 const overviewLoaded = ref(false)
 const statsLoading = ref(false)
@@ -127,32 +120,135 @@ async function loadOverview() {
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
+/** The current page only — the server decides which rows these are. */
 const users = ref<AdminUser[]>([])
+/** Rows matching the search and filter, not rows in the table. */
+const userTotal = ref(0)
+/**
+ * Whether this tab has been fetched at all — the same sentinel overviewLoaded
+ * uses. The row count cannot answer that question any more: a page is now the
+ * server's answer, and zero rows is a legitimate one (a search that matches
+ * nothing), which would otherwise refetch on every visit to the tab.
+ *
+ * Left false when a load fails, deliberately: returning to the tab is then a
+ * retry rather than a second look at an empty table.
+ */
+const usersLoaded = ref(false)
 const usersLoading = ref(false)
 const userSearch = ref('')
+/**
+ * Banned or not, applied by the API.
+ *
+ * Deliberately not folded into a single "role" dropdown. A ban is orthogonal to
+ * the role — an admin can be banned and is still an admin — and the badge shows
+ * only one of the two because there is one column for it.
+ */
+const userStatusFilter = ref('')
 const userPage = ref(1)
 const userPageSize = ref(10)
-const pagedUsers = computed(() =>
-  users.value.slice((userPage.value - 1) * userPageSize.value, userPage.value * userPageSize.value),
-)
 
-// A refetch (the search) or a resize can leave the page past the end.
-watch([users, userPageSize], () => {
-  userPage.value = 1
-})
+const USER_STATUS_OPTIONS = [
+  { value: 'active', label: 'Active' },
+  { value: 'banned', label: 'Banned' },
+]
+
+// Paging is a refetch now, so the page number is an input to the request
+// rather than an index into an array already in memory.
+watch(userPage, loadUsers)
+
+/**
+ * Anything that changes WHICH rows match sends the reader back to page 1.
+ *
+ * Going through resetUserPage rather than assigning and refetching separately
+ * matters: setting page to 1 when it is already 1 fires no watcher, so the
+ * request has to be made explicitly in that case and must NOT be made twice in
+ * the other.
+ */
+watch([userStatusFilter, userPageSize], resetUserPage)
+
 let userSearchTimer: ReturnType<typeof setTimeout>
 
 watch(userSearch, () => {
   clearTimeout(userSearchTimer)
-  userSearchTimer = setTimeout(loadUsers, 300)
+  userSearchTimer = setTimeout(resetUserPage, 300)
 })
+
+function resetUserPage() {
+  if (userPage.value === 1) void loadUsers()
+  else userPage.value = 1 // the watcher above refetches
+}
 
 // ── User administration ─────────────────────────────────────────────────────
 // Promote/demote changes the role column; moderating a department is a separate
 // assignment, so someone can review GIC without being an admin.
 const majors = ref<{ id: string; acronym: string; name: string; image_url: string | null }[]>([])
+
+/**
+ * "I3-GIC, I4-GIM" — who an upload reaches. Thin wrapper so the template keeps
+ * a one-argument call, the same shape DocumentReviewTable uses.
+ */
+function audienceLabel(audience: { major_id: string; year_level: number }[]) {
+  return sharedAudienceLabel(audience, majors.value)
+}
 const busyUserId = ref<string | null>(null)
 const moderatorMenuFor = ref<string | null>(null)
+
+/** The row the picker is measured against, and the panel itself. */
+const moderatorAnchor = ref<HTMLElement | null>(null)
+const moderatorPanel = ref<HTMLElement | null>(null)
+
+/** The user whose departments are being edited; null closes the panel. */
+const moderatorMenuUser = computed(
+  () => users.value.find((u) => u.id === moderatorMenuFor.value) ?? null,
+)
+
+const { style: moderatorPanelStyle } = useAnchoredPanel(
+  computed(() => !!moderatorMenuFor.value),
+  moderatorAnchor,
+  moderatorPanel,
+)
+
+/**
+ * Dismissing the department picker.
+ *
+ * It used to open and close from one tick button, so it needed no dismissal of
+ * its own. Now it opens from the row menu — which closes itself on select — and
+ * without this it would stay open with nothing to click to get rid of it.
+ *
+ * `mousedown`, not `click`, and the listener is attached only while the picker
+ * is open: a re-render between mousedown and click can detach the target, which
+ * makes an inside click read as outside. Same reasoning as FilterDashboard.
+ */
+function closeModeratorMenu() {
+  moderatorMenuFor.value = null
+}
+
+function onModeratorPointerDown(e: MouseEvent) {
+  const target = e.target as HTMLElement | null
+  if (target?.closest?.('[data-moderator-menu]')) return
+  closeModeratorMenu()
+}
+
+function onModeratorKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeModeratorMenu()
+}
+
+watch(moderatorMenuFor, (open) => {
+  if (open) {
+    // Registered during the menu item's `click`, so this interaction's own
+    // mousedown has already passed and cannot close it immediately.
+    document.addEventListener('mousedown', onModeratorPointerDown)
+    document.addEventListener('keydown', onModeratorKeydown)
+  } else {
+    document.removeEventListener('mousedown', onModeratorPointerDown)
+    document.removeEventListener('keydown', onModeratorKeydown)
+  }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', onModeratorPointerDown)
+  document.removeEventListener('keydown', onModeratorKeydown)
+})
 const banTarget = ref<{ id: string; name: string } | null>(null)
 
 async function loadMajors() {
@@ -457,6 +553,29 @@ function deleteBook() {
   })
 }
 
+/**
+ * Open the department picker for a user.
+ *
+ * Opens a picker rather than flipping a flag: moderation is granted per
+ * department, so "promote" has no meaning until one is chosen. The picker was
+ * previously reachable only from a small tick icon, which is why nobody found
+ * it.
+ *
+ * The anchor has to be set BEFORE the panel opens — useAnchoredPanel measures
+ * against it on the next tick, and with no anchor it leaves the panel parked
+ * off-screen at -9999px, which looks exactly like nothing happening.
+ *
+ * Found by querying the row rather than held in a ref map. Vue re-registers an
+ * inline function ref on every render, unsetting the old one, so a map kept
+ * that way is only ever as correct as the ordering of those two calls. The row
+ * is in the DOM whenever its menu can be clicked, so asking for it then needs
+ * no bookkeeping at all.
+ */
+function openModeratorPicker(userId: string) {
+  moderatorAnchor.value = document.querySelector<HTMLElement>(`[data-user-row="${userId}"]`)
+  moderatorMenuFor.value = userId
+}
+
 function onUserAction(
   key: string,
   user: {
@@ -470,6 +589,7 @@ function onUserAction(
   },
 ) {
   if (key === 'placement') editPlacement(user)
+  else if (key === 'moderator') openModeratorPicker(user.id)
   else if (key === 'role') setRole(user)
   else if (key === 'remove-moderator') removeModerator(user)
   else if (key === 'ban') confirmBan(user)
@@ -489,36 +609,90 @@ function toggleModerator(user: { id: string; moderates?: { id: string }[] }, maj
   })
 }
 
+/**
+ * "Latest request wins", for the three tables that refetch as you type.
+ *
+ * Typing "gic" fires a request for "gi" and then one for "gic"; if the first
+ * resolves second — which is ordinary on a slow connection — the table would
+ * settle on results for a term the box no longer contains. Each loader claims a
+ * ticket before awaiting and drops its response unless the ticket is still the
+ * newest. Cancellation is not enough on its own: an in-flight request can
+ * already be past the point of being aborted.
+ */
+function latestRequestGuard() {
+  let issued = 0
+  return {
+    claim: () => ++issued,
+    isCurrent: (ticket: number) => ticket === issued,
+  }
+}
+
+const userRequests = latestRequestGuard()
+
 async function loadUsers() {
+  const ticket = userRequests.claim()
   usersLoading.value = true
   try {
-    const { data } = await api.get('/admin/users', {
-      params: userSearch.value ? { search: userSearch.value } : {},
+    const { data } = await api.get<Paginated<AdminUser>>('/admin/users', {
+      params: {
+        page: userPage.value,
+        limit: userPageSize.value,
+        ...(userSearch.value ? { search: userSearch.value } : {}),
+        ...(userStatusFilter.value ? { status: userStatusFilter.value } : {}),
+      },
     })
-    users.value = data
+    if (!userRequests.isCurrent(ticket)) return
+    users.value = data.items
+    userTotal.value = data.total
+    usersLoaded.value = true
+  } catch (e) {
+    if (!userRequests.isCurrent(ticket)) return
+    users.value = []
+    userTotal.value = 0
+    showToast(apiErrorMessage(e, 'Could not load users'), { type: 'error' })
   } finally {
-    usersLoading.value = false
+    // Only the newest request owns the spinner; a stale one turning it off
+    // would clear it while the current request is still running.
+    if (userRequests.isCurrent(ticket)) usersLoading.value = false
   }
 }
 
 // ── Documents ─────────────────────────────────────────────────────────────────
+/** The current page only — the server decides which rows these are. */
 const allDocs = ref<AdminDocument[]>([])
+/** Rows matching the search and filters, not rows in the table. */
+const docTotal = ref(0)
+/** See usersLoaded. */
+const docsLoaded = ref(false)
 const docsLoading = ref(false)
 const docSearch = ref('')
 const docTypeFilter = ref('')
 const docMajorFilter = ref('')
-const docUploaderFilter = ref('')
+/**
+ * Which uploads the tab lists. Starts on 'active' — what it showed before this
+ * filter existed — and never goes empty: a rejected upload has had its files
+ * deleted from storage, so mixing the two would fill the table with rows whose
+ * files cannot be opened. 'pending' is absent on purpose; those live in
+ * Approvals, where there is something to do about them.
+ *
+ * All four values now go to the server as `status`. Hidden and expired are
+ * sub-states of an ACTIVE upload rather than review states, so the API turns
+ * them into predicates — see documentStatusClause in admin.service.ts, which
+ * mirrors docDisplayStatus below, precedence included. They used to be narrowed
+ * here, which only worked while the browser held every row.
+ */
+const docStatusFilter = ref('active')
 const docPeriodFilter = ref('all')
 const docPage = ref(1)
 const docPageSize = ref(10)
-const pagedDocs = computed(() =>
-  allDocs.value.slice((docPage.value - 1) * docPageSize.value, docPage.value * docPageSize.value),
-)
 
-// A refetch (any filter change) or a resize can leave the page past the end.
-watch([allDocs, docPageSize], () => {
-  docPage.value = 1
-})
+watch(docPage, loadDocuments)
+watch([docTypeFilter, docMajorFilter, docStatusFilter, docPeriodFilter, docPageSize], resetDocPage)
+
+function resetDocPage() {
+  if (docPage.value === 1) void loadDocuments()
+  else docPage.value = 1 // the watcher above refetches
+}
 const deletingDocId = ref<string | null>(null)
 const expandedUploads = ref(new Set<string>())
 
@@ -553,10 +727,8 @@ const docTypeOptions = computed(() => docTypes.filter((type) => type.value))
 
 watch(docSearch, () => {
   clearTimeout(docSearchTimer)
-  docSearchTimer = setTimeout(loadDocuments, 300)
+  docSearchTimer = setTimeout(resetDocPage, 300)
 })
-
-watch([docTypeFilter, docMajorFilter, docUploaderFilter, docPeriodFilter], loadDocuments)
 
 const docFiltersActive = computed(
   () =>
@@ -564,60 +736,90 @@ const docFiltersActive = computed(
       docSearch.value ||
       docTypeFilter.value ||
       docMajorFilter.value ||
-      docUploaderFilter.value ||
+      docStatusFilter.value !== 'active' ||
       docPeriodFilter.value !== 'all'
     ),
-)
-
-/** Everyone who could have uploaded — the user list, so filtering never
- *  narrows the options it offers. */
-const uploaderOptions = computed(() =>
-  users.value.map((user) => ({
-    value: user.id,
-    label: `${user.first_name} ${user.last_name}`.trim() || user.email,
-  })),
 )
 
 function clearDocFilters() {
   docSearch.value = ''
   docTypeFilter.value = ''
   docMajorFilter.value = ''
-  docUploaderFilter.value = ''
+  docStatusFilter.value = 'active'
   docPeriodFilter.value = 'all'
 }
 
+const docRequests = latestRequestGuard()
+
 async function loadDocuments() {
+  const ticket = docRequests.claim()
   docsLoading.value = true
   try {
-    const params: Record<string, string> = {}
+    const params: Record<string, string | number> = {
+      page: docPage.value,
+      limit: docPageSize.value,
+      // All four display states go through as-is now; the API knows that
+      // hidden and expired are sub-states of an active upload.
+      status: docStatusFilter.value,
+    }
     if (docSearch.value) params.search = docSearch.value
     if (docTypeFilter.value) params.doc_type = docTypeFilter.value
     if (docMajorFilter.value) params.major_id = docMajorFilter.value
-    if (docUploaderFilter.value) params.uploader_id = docUploaderFilter.value
     // The period is a cutoff the server compares `uploaded_at` against.
     const cutoff = cutoffFor(docPeriodFilter.value)
     if (cutoff !== null) params.since = new Date(cutoff).toISOString()
-    const { data } = await api.get('/admin/documents', { params })
-    allDocs.value = data
+
+    const { data } = await api.get<Paginated<AdminDocument>>('/admin/documents', { params })
+    if (!docRequests.isCurrent(ticket)) return
+    allDocs.value = data.items
+    docTotal.value = data.total
+    docsLoaded.value = true
+  } catch (e) {
+    if (!docRequests.isCurrent(ticket)) return
+    allDocs.value = []
+    docTotal.value = 0
+    showToast(apiErrorMessage(e, 'Could not load documents'), { type: 'error' })
   } finally {
-    docsLoading.value = false
+    if (docRequests.isCurrent(ticket)) docsLoading.value = false
   }
 }
 
-async function deleteDocument(doc: AdminDocument) {
-  if (!confirm(`Delete "${doc.title}"? This cannot be undone.`)) return
+/**
+ * Asked through the app's own modal rather than window.confirm.
+ *
+ * The native dialog is drawn by the browser, not the page: it carries the
+ * origin as its title, cannot be styled, and blocks the whole tab while it is
+ * up. Every other destructive action here already asks through
+ * ConfirmDeleteModal, so these two were the only places that looked and
+ * behaved differently.
+ */
+const docToDelete = ref<AdminDocument | null>(null)
+
+async function deleteDocument() {
+  const doc = docToDelete.value
+  if (!doc) return
   deletingDocId.value = doc.id
   try {
     await api.delete(`/admin/documents/${doc.id}`)
-    allDocs.value = allDocs.value.filter((d) => d.id !== doc.id)
     stats.value.totalDocuments = Math.max(0, stats.value.totalDocuments - 1)
+    docToDelete.value = null
+    showToast('Document deleted')
+    /**
+     * Refetch rather than splice. The row is one of `limit` the server chose,
+     * so dropping it locally leaves a short page and a `total` that no longer
+     * matches. Removing the last row of the last page also leaves the reader
+     * stranded past the end, so step back first and let the watcher refetch.
+     */
+    if (allDocs.value.length === 1 && docPage.value > 1) docPage.value -= 1
+    else await loadDocuments()
+  } catch (e) {
+    showToast(apiErrorMessage(e, 'Could not delete that document'), { type: 'error' })
   } finally {
     deletingDocId.value = null
   }
 }
 
 // ── Approvals ─────────────────────────────────────────────────────────────────
-const pendingSubjects = ref<AdminPendingSubject[]>([])
 const pendingDocs = ref<AdminPendingDocument[]>([])
 const approvalsLoading = ref(false)
 const actioningId = ref<string | null>(null)
@@ -720,34 +922,16 @@ const pendingDocGroups = computed<DocGroup[]>(() => {
   return Array.from(groups.values())
 })
 
-const pendingCount = computed(() => pendingSubjects.value.length + pendingDocGroups.value.length)
+const pendingCount = computed(() => pendingDocGroups.value.length)
 
 async function loadApprovals() {
   approvalsLoading.value = true
   try {
-    const [s, d] = await Promise.all([
-      api.get('/admin/pending/subjects'),
-      api.get('/admin/pending/documents'),
-    ])
-    pendingSubjects.value = s.data
+    const d = await api.get('/admin/pending/documents')
     pendingDocs.value = d.data
   } finally {
     approvalsLoading.value = false
   }
-}
-
-async function approveSubject(id: string) {
-  actioningId.value = id
-  try {
-    await api.patch(`/admin/subjects/${id}/approve`)
-    pendingSubjects.value = pendingSubjects.value.filter((s) => s.id !== id)
-  } finally {
-    actioningId.value = null
-  }
-}
-
-async function rejectSubject(id: string) {
-  openRejectModal(id, 'subject')
 }
 
 async function approveDoc(groupId: string) {
@@ -763,22 +947,27 @@ async function approveDoc(groupId: string) {
       await api.patch(`/admin/documents/group/${groupId}/approve`)
     }
     pendingDocs.value = pendingDocs.value.filter((d) => d.group_id !== groupId)
+    showToast('Approved', { duration: 5000 })
+  } catch (e) {
+    // The row stays in the queue on failure — it was never actioned, and
+    // removing it would hide work still waiting to be done.
+    showToast(apiErrorMessage(e, 'That approval was refused'), { type: 'error' })
   } finally {
     actioningId.value = null
   }
 }
 
 async function rejectDoc(groupId: string) {
-  openRejectModal(groupId, 'document')
+  openRejectModal(groupId)
 }
 
 // ── Reject modal ──────────────────────────────────────────────────────────────
-const rejectModal = ref<{ id: string; type: 'subject' | 'document' } | null>(null)
+const rejectModal = ref<{ id: string } | null>(null)
 const rejectReason = ref('')
 const rejecting = ref(false)
 
-function openRejectModal(id: string, type: 'subject' | 'document') {
-  rejectModal.value = { id, type }
+function openRejectModal(id: string) {
+  rejectModal.value = { id }
   rejectReason.value = ''
 }
 
@@ -789,14 +978,15 @@ function closeRejectModal() {
 
 async function confirmReject() {
   if (!rejectModal.value) return
-  const { id, type } = rejectModal.value
+  const { id } = rejectModal.value
+  // Guards the Enter key and anything else that reaches here past the disabled
+  // button; the server rejects a blank reason regardless.
+  const reason = rejectReason.value.trim()
+  if (!reason) return
   rejecting.value = true
   try {
-    const payload = rejectReason.value.trim() ? { reason: rejectReason.value.trim() } : {}
-    if (type === 'subject') {
-      await api.patch(`/admin/subjects/${id}/reject`, payload)
-      pendingSubjects.value = pendingSubjects.value.filter((s) => s.id !== id)
-    } else if (reviewScopeOf(id) === 'file') {
+    const payload = { reason }
+    if (reviewScopeOf(id) === 'file') {
       for (const fileId of pendingFileIdsOf(id)) {
         await api.patch(`/admin/documents/files/${fileId}/reject`, payload)
       }
@@ -806,6 +996,11 @@ async function confirmReject() {
       pendingDocs.value = pendingDocs.value.filter((d) => d.group_id !== id)
     }
     closeRejectModal()
+    showToast('Rejected', { duration: 5000 })
+  } catch (e) {
+    // Leaves the modal open with the text intact, so the reason can be fixed
+    // rather than retyped — a blank or over-long one is refused by the server.
+    showToast(apiErrorMessage(e, 'That rejection was refused'), { type: 'error' })
   } finally {
     rejecting.value = false
   }
@@ -819,75 +1014,78 @@ interface AdminSubject {
   year_level: number
   semester: string | number
   subject_url: string | null
-  status: string
   majors: { id: string; acronym: string } | null
   users: { id: string; first_name: string; last_name: string } | null
 }
+/** The current page only — the server decides which rows these are. */
 const allSubjects = ref<AdminSubject[]>([])
+/** Rows matching the search and filter, not rows in the table. */
+const subjectTotal = ref(0)
+/** See usersLoaded. */
+const subjectsLoaded = ref(false)
 const subjectsLoading = ref(false)
 const subjectSearch = ref('')
 const subjectMajorFilter = ref('')
-const subjectStatusFilter = ref('')
 const subjectPage = ref(1)
 const subjectPageSize = ref(10)
-const pagedSubjects = computed(() =>
-  allSubjects.value.slice(
-    (subjectPage.value - 1) * subjectPageSize.value,
-    subjectPage.value * subjectPageSize.value,
-  ),
-)
 
-// A refetch (any filter change) or a resize can leave the page past the end.
-watch([allSubjects, subjectPageSize], () => {
-  subjectPage.value = 1
-})
+watch(subjectPage, loadAllSubjects)
+watch([subjectMajorFilter, subjectPageSize], resetSubjectPage)
+
+function resetSubjectPage() {
+  if (subjectPage.value === 1) void loadAllSubjects()
+  else subjectPage.value = 1 // the watcher above refetches
+}
 
 const editingAdminSubject = ref<AdminSubject | null>(null)
 const savingAdminSubjectId = ref<string | null>(null)
 const deletingAdminSubjectId = ref<string | null>(null)
 let subjectSearchTimer: ReturnType<typeof setTimeout>
 
-const statusStyle: Record<string, string> = {
-  active: 'bg-green-100 text-green-700',
-  pending: 'bg-yellow-100 text-yellow-700',
-  rejected: 'bg-red-100 text-red-700',
-}
-
+// Dropdowns commit immediately — only free text needs debouncing.
 watch(subjectSearch, () => {
   clearTimeout(subjectSearchTimer)
-  subjectSearchTimer = setTimeout(loadAllSubjects, 300)
+  subjectSearchTimer = setTimeout(resetSubjectPage, 300)
 })
 
-// Dropdowns commit immediately — only free text needs debouncing.
-watch([subjectMajorFilter, subjectStatusFilter], loadAllSubjects)
-
-const subjectFiltersActive = computed(
-  () => !!(subjectSearch.value || subjectMajorFilter.value || subjectStatusFilter.value),
-)
+const subjectFiltersActive = computed(() => !!(subjectSearch.value || subjectMajorFilter.value))
 
 function clearSubjectFilters() {
   subjectSearch.value = ''
   subjectMajorFilter.value = ''
-  subjectStatusFilter.value = ''
 }
 
+const subjectRequests = latestRequestGuard()
+
 async function loadAllSubjects() {
+  const ticket = subjectRequests.claim()
   subjectsLoading.value = true
   try {
-    const params: Record<string, string> = {}
+    const params: Record<string, string | number> = {
+      page: subjectPage.value,
+      limit: subjectPageSize.value,
+    }
     if (subjectSearch.value) params.search = subjectSearch.value
     if (subjectMajorFilter.value) params.major_id = subjectMajorFilter.value
-    if (subjectStatusFilter.value) params.status = subjectStatusFilter.value
-    const { data } = await api.get('/admin/subjects', { params })
-    allSubjects.value = data
+
+    const { data } = await api.get<Paginated<AdminSubject>>('/admin/subjects', { params })
+    if (!subjectRequests.isCurrent(ticket)) return
+    allSubjects.value = data.items
+    subjectTotal.value = data.total
+    subjectsLoaded.value = true
+  } catch (e) {
+    if (!subjectRequests.isCurrent(ticket)) return
+    allSubjects.value = []
+    subjectTotal.value = 0
+    showToast(apiErrorMessage(e, 'Could not load subjects'), { type: 'error' })
   } finally {
-    subjectsLoading.value = false
+    if (subjectRequests.isCurrent(ticket)) subjectsLoading.value = false
   }
 }
 
 function onAdminSubjectAction(key: string, subject: AdminSubject) {
   if (key === 'edit') openAdminSubjectEdit(subject)
-  else deleteAdminSubject(subject.id, subject.name)
+  else subjectToDelete.value = { id: subject.id, name: subject.name }
 }
 
 function openAdminSubjectEdit(subject: AdminSubject) {
@@ -898,58 +1096,94 @@ function closeAdminSubjectEdit() {
   editingAdminSubject.value = null
 }
 
-async function saveAdminSubjectEdit(payload: { name: string; acronym: string; semester: string }) {
+async function saveAdminSubjectEdit(payload: {
+  name: string
+  acronym: string
+  semester: string
+  image: File | null
+  removeImage: boolean
+}) {
   const subject = editingAdminSubject.value
   if (!subject) return
 
   savingAdminSubjectId.value = subject.id
   try {
-    const body: { name: string; acronym: string; semester?: number } = {
-      name: payload.name,
-      acronym: payload.acronym,
+    const semester = payload.semester ? Number(payload.semester) : undefined
+
+    /**
+     * Multipart only when the cover is actually part of the edit. A rename on
+     * its own stays JSON, so the common case does not pay for a file encoding
+     * it has no file for.
+     *
+     * An empty subject_url is how the form says "remove it" — the API treats
+     * absent as "leave alone", so the field has to be sent to clear it.
+     */
+    let data: FormData | Record<string, unknown>
+    if (payload.image || payload.removeImage) {
+      const form = new FormData()
+      form.append('name', payload.name)
+      form.append('acronym', payload.acronym)
+      if (semester !== undefined) form.append('semester', String(semester))
+      if (payload.image) form.append('image', payload.image)
+      else form.append('subject_url', '')
+      data = form
+    } else {
+      data = { name: payload.name, acronym: payload.acronym, ...(semester ? { semester } : {}) }
     }
-    if (payload.semester) body.semester = Number(payload.semester)
-    await api.patch(`/admin/subjects/${subject.id}`, body)
-    subject.name = body.name
-    subject.acronym = body.acronym
-    if (body.semester) subject.semester = body.semester
+
+    /**
+     * The multipart header has to be stated, not left to axios.
+     *
+     * http.ts gives the instance a `Content-Type: application/json` default,
+     * and axios only auto-detects FormData when no type is set — so without
+     * this the body is serialised as JSON, the file is dropped, and the API
+     * rejects what arrives. Axios replaces the value below with the same type
+     * plus the generated boundary. Every other upload here does the same.
+     */
+    const { data: result } = await api.patch<{ subject_url: string | null }>(
+      `/admin/subjects/${subject.id}`,
+      data,
+      data instanceof FormData ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined,
+    )
+
+    subject.name = payload.name
+    subject.acronym = payload.acronym
+    if (semester !== undefined) subject.semester = semester
+    if (payload.image || payload.removeImage) subject.subject_url = result?.subject_url ?? null
     closeAdminSubjectEdit()
+  } catch (e) {
+    // Without this the rejection only reached the console, and the modal sat
+    // there looking as though nothing had been pressed.
+    showToast(apiErrorMessage(e, 'Could not update subject'), { type: 'error' })
   } finally {
     savingAdminSubjectId.value = null
   }
 }
 
-async function deleteAdminSubject(id: string, name: string) {
-  if (!confirm(`Delete "${name}"? This cannot be undone.`)) return
-  deletingAdminSubjectId.value = id
+/** See deleteDocument — same reason for the modal. */
+const subjectToDelete = ref<{ id: string; name: string } | null>(null)
+
+async function deleteAdminSubject() {
+  const target = subjectToDelete.value
+  if (!target) return
+  deletingAdminSubjectId.value = target.id
   try {
-    await api.delete(`/admin/subjects/${id}`)
-    allSubjects.value = allSubjects.value.filter((s) => s.id !== id)
+    await api.delete(`/admin/subjects/${target.id}`)
+    subjectToDelete.value = null
+    showToast('Subject deleted')
+    // Refetch rather than splice — see deleteDocument for why.
+    if (allSubjects.value.length === 1 && subjectPage.value > 1) subjectPage.value -= 1
+    else await loadAllSubjects()
+  } catch (e) {
+    showToast(apiErrorMessage(e, 'Could not delete that subject'), { type: 'error' })
   } finally {
     deletingAdminSubjectId.value = null
   }
 }
 
-const pendingSubjectSearch = ref('')
-const pendingSubjectMajor = ref('')
-const pendingSubjectSubmitter = ref('')
-const pendingSubjectPeriod = ref('all')
-
 const pendingSearch = ref('')
-const pendingUploader = ref('')
 const pendingMajor = ref('')
 const pendingPeriod = ref('all')
-
-/** Uploaders that actually appear in the queue — no empty options. */
-const pendingUploaders = computed(() => {
-  const seen = new Map<string, string>()
-  for (const doc of pendingDocGroups.value) {
-    if (doc.users) seen.set(doc.users.id, `${doc.users.first_name} ${doc.users.last_name}`.trim())
-  }
-  return Array.from(seen, ([value, label]) => ({ value, label })).sort((a, b) =>
-    a.label.localeCompare(b.label),
-  )
-})
 
 const pendingMajors = computed(() => {
   const seen = new Map<string, string>()
@@ -968,11 +1202,44 @@ const PERIOD_OPTIONS = [
   { value: '30d', label: 'Last 30 days' },
 ]
 
-const STATUS_OPTIONS = [
+/**
+ * The four states a document can be in here, in the order they outrank each
+ * other. Same set and same precedence the owner's dashboard shows, so one
+ * document never reads as two different things on two screens.
+ *
+ * Only `rejected` and `active` are review states. Hidden is the uploader's own
+ * switch and outranks everything — a withdrawn document is withdrawn whatever
+ * else is true of it. Expiry comes last because it only ever replaces
+ * "Active": a rejected upload was never in circulation, so calling it expired
+ * answers a question nobody asked.
+ */
+const DOC_STATUS_OPTIONS = [
   { value: 'active', label: 'Active' },
-  { value: 'pending', label: 'Pending' },
-  { value: 'rejected', label: 'Rejected' },
+  { value: 'rejected', label: 'Not approved' },
+  { value: 'hidden', label: 'Hidden' },
+  { value: 'expired', label: 'Expired' },
 ]
+
+const DOC_STATUS_TONE: Record<string, string> = {
+  active: 'bg-primary/10 text-primary',
+  rejected: 'bg-red-100 text-red-700',
+  hidden: 'bg-gray-200 text-gray-600',
+  expired: 'bg-gray-200 text-gray-600',
+}
+
+/** Which of the four a row actually is. */
+function docDisplayStatus(doc: AdminDocument): string {
+  if (doc.hidden_at) return 'hidden'
+  if (doc.status === 'rejected') return 'rejected'
+  if (isExpired(doc.expires_at)) return 'expired'
+  return 'active'
+}
+
+/** Its label, from the same list the filter offers so the two cannot drift. */
+function docStatusLabel(doc: AdminDocument) {
+  const key = docDisplayStatus(doc)
+  return DOC_STATUS_OPTIONS.find((o) => o.value === key)?.label ?? key
+}
 
 /** Every department, for filters that query the server. */
 const majorOptions = computed(() =>
@@ -992,97 +1259,27 @@ function cutoffFor(period: string) {
   return days ? Date.now() - days * 24 * 60 * 60 * 1000 : null
 }
 
-const pendingSubjectMajors = computed(() => {
-  const seen = new Map<string, string>()
-  for (const subject of pendingSubjects.value) {
-    if (subject.majors) seen.set(subject.majors.id, subject.majors.acronym)
-  }
-  return Array.from(seen, ([value, label]) => ({ value, label })).sort((a, b) =>
-    a.label.localeCompare(b.label),
-  )
-})
-
-const pendingSubjectSubmitters = computed(() => {
-  const seen = new Map<string, string>()
-  for (const subject of pendingSubjects.value) {
-    if (subject.users) {
-      seen.set(subject.users.id, `${subject.users.first_name} ${subject.users.last_name}`.trim())
-    }
-  }
-  return Array.from(seen, ([value, label]) => ({ value, label })).sort((a, b) =>
-    a.label.localeCompare(b.label),
-  )
-})
-
-const filteredPendingSubjects = computed(() => {
-  const term = pendingSubjectSearch.value.trim().toLowerCase()
-  const cutoff = cutoffFor(pendingSubjectPeriod.value)
-
-  return pendingSubjects.value.filter((subject) => {
-    if (
-      term &&
-      !String(subject.name ?? '')
-        .toLowerCase()
-        .includes(term)
-    )
-      return false
-    if (pendingSubjectMajor.value && subject.majors?.id !== pendingSubjectMajor.value) return false
-    if (pendingSubjectSubmitter.value && subject.users?.id !== pendingSubjectSubmitter.value) {
-      return false
-    }
-    if (cutoff !== null) {
-      const at = ageOf(subject.created_at)
-      if (at === null || at < cutoff) return false
-    }
-    return true
-  })
-})
-
 const PAGE_SIZE_OPTIONS = [10, 30, 50, 100]
 
-const pendingSubjectPage = ref(1)
-const pendingSubjectPageSize = ref(10)
-const pagedPendingSubjects = computed(() =>
-  filteredPendingSubjects.value.slice(
-    (pendingSubjectPage.value - 1) * pendingSubjectPageSize.value,
-    pendingSubjectPage.value * pendingSubjectPageSize.value,
-  ),
-)
-
 // Filtering or resizing can leave the current page past the end of the list.
-watch([filteredPendingSubjects, pendingSubjectPageSize], () => {
-  pendingSubjectPage.value = 1
-})
-
-const pendingSubjectFiltersActive = computed(
-  () =>
-    !!(
-      pendingSubjectSearch.value ||
-      pendingSubjectMajor.value ||
-      pendingSubjectSubmitter.value ||
-      pendingSubjectPeriod.value !== 'all'
-    ),
-)
-
-function clearPendingSubjectFilters() {
-  pendingSubjectSearch.value = ''
-  pendingSubjectMajor.value = ''
-  pendingSubjectSubmitter.value = ''
-  pendingSubjectPeriod.value = 'all'
-}
-
-function onSubjectAction(key: string, subject: { id: string }) {
-  if (key === 'approve') approveSubject(subject.id)
-  else if (key === 'reject') rejectSubject(subject.id)
-}
 
 const filteredDocGroups = computed(() => {
   const term = pendingSearch.value.trim().toLowerCase()
   const cutoff = cutoffFor(pendingPeriod.value)
 
   return pendingDocGroups.value.filter((doc) => {
-    if (term && !doc.title?.toLowerCase().includes(term)) return false
-    if (pendingUploader.value && doc.users?.id !== pendingUploader.value) return false
+    // Title or uploader, replacing the dropdown that used to pick the uploader
+    // — typing a name beats opening a list that grows with the queue.
+    //
+    // Each field is tested on its own rather than against one joined string,
+    // so a term cannot match by straddling the two: "database sok" should find
+    // nothing, not every document Sok happens to have named "Database".
+    if (term) {
+      const uploader = `${doc.users?.first_name ?? ''} ${doc.users?.last_name ?? ''}`.trim()
+      const hit =
+        (doc.title ?? '').toLowerCase().includes(term) || uploader.toLowerCase().includes(term)
+      if (!hit) return false
+    }
     if (pendingMajor.value && doc.majors?.id !== pendingMajor.value) return false
     if (cutoff !== null) {
       const at = ageOf(doc.uploaded_at)
@@ -1106,50 +1303,30 @@ watch([filteredDocGroups, pendingDocPageSize], () => {
 })
 
 const pendingFiltersActive = computed(
-  () =>
-    !!(
-      pendingSearch.value ||
-      pendingUploader.value ||
-      pendingMajor.value ||
-      pendingPeriod.value !== 'all'
-    ),
+  () => !!(pendingSearch.value || pendingMajor.value || pendingPeriod.value !== 'all'),
 )
 
 function clearPendingFilters() {
   pendingSearch.value = ''
-  pendingUploader.value = ''
   pendingMajor.value = ''
   pendingPeriod.value = 'all'
 }
 
-const approvalsEmpty = computed(() =>
-  approvalsSection.value === 'subjects'
-    ? pendingSubjects.value.length === 0
-    : pendingDocGroups.value.length === 0,
-)
+const approvalsEmpty = computed(() => pendingDocGroups.value.length === 0)
 
-const approvalsEmptyText = computed(() =>
-  approvalsSection.value === 'subjects' ? 'No pending subjects.' : 'No pending documents.',
-)
+const approvalsEmptyText = computed(() => 'No pending documents.')
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 watch(activeTab, (tab) => {
-  // Leaving the section collapses it, so the sidebar never claims a queue you left.
-  if (tab !== 'approvals') {
-    approvalsOpen.value = false
-    approvalsSection.value = 'subjects'
-  }
   if (tab === 'overview' && !overviewLoaded.value) loadOverview()
-  if (tab === 'approvals' && pendingSubjects.value.length === 0 && pendingDocs.value.length === 0)
-    loadApprovals()
-  if (tab === 'users' && users.value.length === 0) loadUsers()
+  if (tab === 'approvals' && pendingDocs.value.length === 0) loadApprovals()
+  if (tab === 'users' && !usersLoaded.value) void loadUsers()
   if (tab === 'books' && books.value.length === 0) void loadBooks()
   if (tab === 'departments') void loadDepartments()
-  if (tab === 'subjects' && allSubjects.value.length === 0) loadAllSubjects()
-  if (tab === 'documents') {
-    if (allDocs.value.length === 0) loadDocuments()
-    if (users.value.length === 0) loadUsers()
-  }
+  if (tab === 'subjects' && !subjectsLoaded.value) void loadAllSubjects()
+  // No user list here any more: it existed only to fill the uploader dropdown,
+  // and the table reads each uploader off the document itself.
+  if (tab === 'documents' && !docsLoaded.value) void loadDocuments()
 })
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1230,6 +1407,47 @@ const promotionCountdown = computed(() => {
   return `${minutes}m ${seconds}s`
 })
 
+/**
+ * The card's three states, resolved once.
+ *
+ * The template used to spell the same three-way condition out again for the
+ * dot, the label and every colour — four places to keep in step for one fact.
+ * The sentence carries the date rather than sitting beside it, which is what
+ * let the explanatory paragraph go: "Everyone moves up a year on <date>" says
+ * what the feature does and when, in one line.
+ */
+const promotionState = computed(() => {
+  const at = promotion.value?.rollover_at
+  if (!at) {
+    return {
+      label: 'Not scheduled',
+      badge: 'bg-gray-100 text-gray-600',
+      tile: 'bg-gray-100',
+      icon: 'text-gray-400',
+      detail: 'Moves every student up one year.',
+      action: 'Schedule promotion',
+    }
+  }
+  const when = formatExpiry(at)
+  return promotion.value?.has_passed
+    ? {
+        label: 'In effect',
+        badge: 'bg-green-100 text-green-700',
+        tile: 'bg-green-50',
+        icon: 'text-green-500',
+        detail: `Everyone moved up a year on ${when}.`,
+        action: 'Change date',
+      }
+    : {
+        label: 'Scheduled',
+        badge: 'bg-amber-100 text-amber-700',
+        tile: 'bg-amber-50',
+        icon: 'text-amber-500',
+        detail: `Everyone moves up a year on ${when}.`,
+        action: 'Change date',
+      }
+})
+
 async function loadPromotion() {
   try {
     const { data } = await api.get('/admin/promotion')
@@ -1298,15 +1516,20 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex min-h-screen bg-[#F5F6FA]">
+  <!-- h-screen + overflow-hidden, not min-h-screen: this shell must never be
+       the thing that scrolls. The sidebar is fixed and the column beside it is
+       exactly h-screen, so <main> is the only intended scroller — but
+       min-h-screen let the shell GROW when a child overflowed, which handed the
+       scrollbar to the page. The column then scrolled up as one block and left
+       a band of this background under the last card. Pinning the shell to the
+       viewport makes that impossible. -->
+  <div class="flex h-screen overflow-hidden bg-[#F5F6FA]">
     <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
     <aside class="fixed inset-y-0 left-0 w-56 bg-white shadow-sm flex flex-col z-30">
       <!-- Logo -->
       <div class="px-5 h-16 flex items-center border-b border-gray-100">
         <div class="flex items-center gap-2.5">
-          <div class="h-9 w-9 rounded-xl bg-primary flex items-center justify-center">
-            <span class="text-white text-base font-extrabold">I</span>
-          </div>
+          <img :src="logoUrl" alt="" class="h-9 w-9 shrink-0 object-contain" />
           <div>
             <p class="text-sm font-extrabold text-gray-900 leading-tight">ITC Sharing</p>
             <p class="text-[11px] text-gray-400 leading-tight">Admin Panel</p>
@@ -1333,7 +1556,7 @@ onMounted(async () => {
           :key="item.tab"
         >
           <button
-            @click="item.tab === 'approvals' ? toggleApprovals() : (activeTab = item.tab)"
+            @click="activeTab = item.tab"
             :class="[
               'relative w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all text-left',
               activeTab === item.tab
@@ -1440,13 +1663,11 @@ onMounted(async () => {
               >{{ pendingCount }}</span
             >
 
-            <!-- Active chevron — on Approvals it doubles as the open/closed caret -->
+            <!-- Active chevron. Approvals used to double this as an open/closed
+                 caret for its submenu; with one queue there is no submenu. -->
             <svg
-              v-if="activeTab === item.tab || item.tab === 'approvals'"
-              :class="[
-                'h-4 w-4 shrink-0 opacity-70 transition-transform',
-                item.tab === 'approvals' && approvalsOpen ? 'rotate-90' : '',
-              ]"
+              v-if="activeTab === item.tab"
+              class="h-4 w-4 shrink-0 opacity-70"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -1459,39 +1680,6 @@ onMounted(async () => {
               />
             </svg>
           </button>
-
-          <!-- Approvals submenu -->
-          <div
-            v-if="item.tab === 'approvals' && approvalsOpen"
-            class="mb-1 ml-5 flex flex-col gap-1 border-l border-gray-100 pl-2"
-          >
-            <button
-              v-for="sub in [
-                { key: 'subjects', label: 'Subjects', count: pendingSubjects.length },
-                { key: 'documents', label: 'Documents', count: pendingDocGroups.length },
-              ] as const"
-              :key="sub.key"
-              @click="openApprovals(sub.key)"
-              :class="[
-                'flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors hover:cursor-pointer',
-                approvalsSection === sub.key
-                  ? 'bg-primary/10 text-primary'
-                  : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700',
-              ]"
-            >
-              <span class="flex-1">{{ sub.label }}</span>
-              <span
-                v-if="sub.count > 0"
-                :class="[
-                  'flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-bold',
-                  approvalsSection === sub.key
-                    ? 'bg-primary text-white'
-                    : 'bg-gray-100 text-gray-500',
-                ]"
-                >{{ sub.count }}</span
-              >
-            </button>
-          </div>
         </template>
       </nav>
 
@@ -1535,7 +1723,11 @@ onMounted(async () => {
     </aside>
 
     <!-- ── Main area ───────────────────────────────────────────────────────── -->
-    <div class="ml-56 flex-1 flex flex-col h-screen">
+    <!-- min-w-0: without it this column takes min-width:auto, so its width is
+         driven by the widest thing inside it. A table that scrolls its own
+         columns then widens the PAGE instead of scrolling, and the heading
+         slides out from under the sidebar. -->
+    <div class="ml-56 flex min-h-0 min-w-0 flex-1 flex-col h-screen">
       <!-- Top header -->
       <!-- z-40 so the header out-ranks everything that scrolls beneath it: the
            sticky table headers inside <main> are z-20, and at equal z-index the
@@ -1574,7 +1766,23 @@ onMounted(async () => {
       </header>
 
       <!-- Page content -->
-      <main class="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-6">
+      <!-- min-w-0 for the same reason, and overflow-x-hidden so nothing inside
+           can scroll the page sideways: anything wider than this area is
+           expected to scroll itself, as the review tables do. -->
+      <!-- min-h-0 is load-bearing, not tidying. A flex item defaults to
+           min-height:auto, which refuses to shrink below its content — so
+           `flex-1 + overflow-y-auto` alone never becomes a scroll viewport:
+           main grows past the h-screen parent instead, and the overflow lands
+           on an ancestor. That is what left a band of page background under the
+           last card. The scroll containers further down this file already pair
+           min-h-0 with overflow-y-auto for the same reason; main was the one
+           that did not.
+
+           overscroll-none then stops a trackpad flick rubber-banding past the
+           end and reopening the same band. -->
+      <main
+        class="flex min-h-0 min-w-0 flex-1 flex-col gap-6 overflow-x-hidden overflow-y-auto overscroll-none px-6 py-6"
+      >
         <!-- ════════════════════════════════════════════════════════════════ -->
         <!-- OVERVIEW TAB                                                     -->
         <!-- ════════════════════════════════════════════════════════════════ -->
@@ -1582,79 +1790,6 @@ onMounted(async () => {
           <div v-if="statsLoading" class="flex justify-center py-24"><LoadingSpinner /></div>
 
           <template v-else>
-            <!-- Promotion schedule. Sits above the statistics because it is the
-                 one thing on this page that changes data rather than reporting
-                 it — and it changes every student's year at once. -->
-            <div class="bg-white rounded-2xl border border-gray-100 px-5 py-5">
-              <div class="flex flex-wrap items-start justify-between gap-4">
-                <div class="min-w-0">
-                  <h3 class="text-base font-semibold text-gray-900">Student promotion</h3>
-                  <p class="mt-1 text-sm text-gray-500 max-w-prose">
-                    Students only move up a year when you schedule it here. Each student advances on
-                    their next visit after the date passes — nothing happens until then.
-                  </p>
-                  <div class="mt-3 flex items-center gap-2 text-sm">
-                    <span
-                      class="h-2 w-2 shrink-0 rounded-full"
-                      :class="
-                        !promotion?.rollover_at
-                          ? 'bg-gray-300'
-                          : promotion.has_passed
-                            ? 'bg-green-500'
-                            : 'bg-amber-500'
-                      "
-                    />
-                    <span
-                      class="font-semibold"
-                      :class="
-                        !promotion?.rollover_at
-                          ? 'text-gray-500'
-                          : promotion.has_passed
-                            ? 'text-green-600'
-                            : 'text-amber-600'
-                      "
-                    >
-                      {{
-                        !promotion?.rollover_at
-                          ? 'No promotion scheduled'
-                          : promotion.has_passed
-                            ? 'In effect'
-                            : 'Scheduled'
-                      }}
-                    </span>
-                    <span v-if="promotion?.rollover_at" class="text-gray-500">
-                      {{ new Date(promotion.rollover_at).toLocaleString() }}
-                    </span>
-                  </div>
-
-                  <!-- Counts down only while it is still ahead; afterwards the
-                       status above already says it is in effect. -->
-                  <div
-                    v-if="promotionCountdown"
-                    class="mt-3 inline-flex items-baseline gap-2 rounded-xl bg-primary/10 px-4 py-2"
-                  >
-                    <span class="text-xs font-semibold uppercase tracking-wide text-primary">
-                      Promotes in
-                    </span>
-                    <span class="font-mono text-lg font-bold tabular-nums text-primary">
-                      {{ promotionCountdown }}
-                    </span>
-                  </div>
-                  <p v-else-if="promotion?.has_passed" class="mt-3 text-xs text-gray-400">
-                    Each student advances on their next visit — it is not applied all at once.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  class="shrink-0 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white transition hover:cursor-pointer hover:bg-primary-hover"
-                  @click="promotionModalOpen = true"
-                >
-                  {{ promotion?.rollover_at ? 'Change date' : 'Schedule promotion' }}
-                </button>
-              </div>
-            </div>
-
             <!-- Stat cards -->
             <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
               <!-- Total Users -->
@@ -1765,13 +1900,102 @@ onMounted(async () => {
               </div>
             </div>
 
+            <!-- Promotion schedule. The one thing on this page that changes
+                 data rather than reporting it — and it changes every student's
+                 year at once, so it keeps a card of its own.
+
+                 One line of prose, not a paragraph: the state is a badge and
+                 the date is the sentence. The caveat about students advancing
+                 lazily lives in the dialog, where it is read at the moment it
+                 matters rather than on every visit to the dashboard. -->
+            <div class="bg-white rounded-2xl border border-gray-100 px-5 py-5">
+              <div class="flex flex-wrap items-center justify-between gap-4">
+                <!-- items-start, not items-center: once the sentence wraps to a
+                     third line on a narrow screen, a vertically-centred tile
+                     drifts away from the heading it belongs to. -->
+                <div class="flex min-w-0 items-start gap-4">
+                  <!-- The same icon tile the statistics use, so this reads as
+                       part of the dashboard rather than a banner beside it. -->
+                  <div
+                    class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl"
+                    :class="promotionState.tile"
+                  >
+                    <svg
+                      class="h-6 w-6"
+                      :class="promotionState.icon"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M4.26 10.147a60.438 60.438 0 0 0-.491 6.347A48.62 48.62 0 0 1 12 20.904a48.62 48.62 0 0 1 8.232-4.41 60.46 60.46 0 0 0-.491-6.347m-15.482 0a50.636 50.636 0 0 0-2.658-.813A59.906 59.906 0 0 1 12 3.493a59.903 59.903 0 0 1 10.399 5.84c-.896.248-1.783.52-2.658.814m-15.482 0A50.717 50.717 0 0 1 12 13.489a50.702 50.702 0 0 1 7.74-3.342M6.75 15a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm0 0v-3.675A55.378 55.378 0 0 1 12 8.443m-7.007 11.55A5.981 5.981 0 0 0 6.75 15.75v-1.5"
+                      />
+                    </svg>
+                  </div>
+
+                  <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <h3 class="text-base font-semibold text-gray-900">Student promotion</h3>
+                      <span
+                        class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                        :class="promotionState.badge"
+                      >
+                        {{ promotionState.label }}
+                      </span>
+                      <!-- Counts down only while it is still ahead; afterwards
+                           the badge already says it is in effect. -->
+                      <span
+                        v-if="promotionCountdown"
+                        class="rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-primary"
+                      >
+                        in {{ promotionCountdown }}
+                      </span>
+                    </div>
+                    <p class="mt-1 text-sm text-gray-500">{{ promotionState.detail }}</p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  class="shrink-0 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white transition hover:cursor-pointer hover:bg-primary-hover"
+                  @click="promotionModalOpen = true"
+                >
+                  {{ promotionState.action }}
+                </button>
+              </div>
+            </div>
+
             <!-- Uploads over time -->
             <div class="bg-white rounded-2xl border border-gray-100 px-6 py-5">
               <div class="flex items-baseline justify-between gap-3">
                 <h2 class="font-semibold text-gray-900">Uploads per month</h2>
-                <p class="text-xs text-gray-400">Approved documents, last 6 months</p>
               </div>
               <UploadsBarChart :data="stats.uploadsByMonth" class="mt-4" />
+            </div>
+
+            <!-- Where the archive actually is, and what state it is in.
+                 Two thirds / one third: the department chart carries thirteen
+                 rows and needs the width; the donut is four segments and does
+                 not. They stack on narrow screens. -->
+            <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+              <div class="bg-white rounded-2xl border border-gray-100 px-6 py-5 lg:col-span-2">
+                <div class="flex items-baseline justify-between gap-3">
+                  <h2 class="font-semibold text-gray-900">Documents per department</h2>
+                  <p class="text-xs text-gray-400">Approved documents</p>
+                </div>
+                <DepartmentBarChart :data="stats.documentsByDepartment" class="mt-4" />
+              </div>
+
+              <div class="bg-white rounded-2xl border border-gray-100 px-6 py-5">
+                <div class="flex items-baseline justify-between gap-3">
+                  <h2 class="font-semibold text-gray-900">Documents by status</h2>
+                </div>
+                <p class="text-xs text-gray-400">Excludes submissions awaiting review</p>
+                <StatusDonutChart :data="stats.documentsByStatus" class="mt-5" />
+              </div>
             </div>
           </template>
         </template>
@@ -1808,85 +2032,9 @@ onMounted(async () => {
 
             <template v-else>
               <!-- Pending Subjects -->
-              <template v-if="pendingSubjects.length > 0 && approvalsSection === 'subjects'">
-                <div class="flex flex-wrap items-center gap-2">
-                  <h2 class="font-semibold text-gray-900">Pending Subjects</h2>
-                  <span
-                    class="text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full"
-                    >{{ pendingSubjectFiltersActive ? `${filteredPendingSubjects.length}/` : ''
-                    }}{{ pendingSubjects.length }}</span
-                  >
-
-                  <div class="ml-auto flex flex-wrap items-center gap-2">
-                    <SearchDashboard
-                      v-model="pendingSubjectSearch"
-                      placeholder="Search by name..."
-                      width="w-52"
-                    />
-                    <FilterDashboard
-                      v-model="pendingSubjectMajor"
-                      :options="pendingSubjectMajors"
-                      all-label="All departments"
-                    />
-                    <FilterDashboard
-                      v-model="pendingSubjectSubmitter"
-                      :options="pendingSubjectSubmitters"
-                      all-label="All submitters"
-                    />
-                    <FilterDashboard v-model="pendingSubjectPeriod" :options="PERIOD_OPTIONS" />
-
-                    <button
-                      v-if="pendingSubjectFiltersActive"
-                      @click="clearPendingSubjectFilters"
-                      class="rounded-xl px-3 py-2 text-sm font-medium text-gray-500 hover:cursor-pointer hover:bg-gray-100"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-
-                <SubjectReviewTable
-                  v-if="pagedPendingSubjects.length"
-                  :rows="pagedPendingSubjects"
-                  :actioning-id="actioningId"
-                  @action="onSubjectAction"
-                />
-
-                <!-- Sibling of the table, not inside it: the table component
-                     now renders its own card, and a filter that matches nothing
-                     should not leave a bare header above the message. -->
-                <div
-                  v-if="filteredPendingSubjects.length === 0"
-                  class="flex flex-col items-center gap-2 py-16 text-center"
-                >
-                  <p class="text-sm font-medium text-gray-600">No subjects match these filters.</p>
-                  <button
-                    @click="clearPendingSubjectFilters"
-                    class="text-sm font-medium text-primary hover:cursor-pointer hover:underline"
-                  >
-                    Clear filters
-                  </button>
-                </div>
-
-                <div class="mt-auto grid grid-cols-3 items-center gap-3">
-                  <Pagination
-                    class="col-start-2 justify-self-center"
-                    v-model:page="pendingSubjectPage"
-                    :total="filteredPendingSubjects.length"
-                    :page-size="pendingSubjectPageSize"
-                  />
-                  <PageSizeSelect
-                    class="col-start-3 justify-self-end"
-                    v-model="pendingSubjectPageSize"
-                    :total="filteredPendingSubjects.length"
-                    :options="PAGE_SIZE_OPTIONS"
-                    direction="up"
-                  />
-                </div>
-              </template>
 
               <!-- Pending Documents -->
-              <template v-if="pendingDocGroups.length > 0 && approvalsSection === 'documents'">
+              <template v-if="pendingDocGroups.length > 0">
                 <div class="flex flex-wrap items-center gap-2">
                   <h2 class="font-semibold text-gray-900">Pending Documents</h2>
                   <span
@@ -1896,20 +2044,18 @@ onMounted(async () => {
                   >
 
                   <div class="ml-auto flex flex-wrap items-center gap-2">
+                    <!-- Wider than the other toolbars: it carries what the
+                         uploader dropdown used to, so the placeholder has to
+                         say so without truncating. -->
                     <SearchDashboard
                       v-model="pendingSearch"
-                      placeholder="Search by name..."
-                      width="w-52"
+                      placeholder="Search title or uploader..."
+                      width="w-64"
                     />
                     <FilterDashboard
                       v-model="pendingMajor"
                       :options="pendingMajors"
                       all-label="All departments"
-                    />
-                    <FilterDashboard
-                      v-model="pendingUploader"
-                      :options="pendingUploaders"
-                      all-label="All uploaders"
                     />
                     <FilterDashboard v-model="pendingPeriod" :options="PERIOD_OPTIONS" />
 
@@ -1974,18 +2120,13 @@ onMounted(async () => {
         <template v-else-if="activeTab === 'subjects'">
           <div class="flex items-center justify-between flex-wrap gap-3">
             <p class="text-sm text-gray-500">
-              <span class="font-semibold text-gray-900">{{ allSubjects.length }}</span> subjects
+              <span class="font-semibold text-gray-900">{{ subjectTotal }}</span> subjects
             </p>
             <div class="flex flex-wrap items-center gap-2">
               <FilterDashboard
                 v-model="subjectMajorFilter"
                 :options="majorOptions"
                 all-label="All departments"
-              />
-              <FilterDashboard
-                v-model="subjectStatusFilter"
-                :options="STATUS_OPTIONS"
-                all-label="Any status"
               />
               <SearchDashboard v-model="subjectSearch" placeholder="Search subjects..." />
 
@@ -2008,7 +2149,7 @@ onMounted(async () => {
             <div
               class="sticky top-0 z-20 grid grid-cols-12 gap-4 border-b border-gray-100 bg-primary px-6 py-3"
             >
-              <p class="col-span-4 text-xs font-semibold text-white uppercase tracking-wide">
+              <p class="col-span-6 text-xs font-semibold text-white uppercase tracking-wide">
                 Subject
               </p>
               <p class="col-span-2 text-xs font-semibold text-white uppercase tracking-wide">
@@ -2018,9 +2159,6 @@ onMounted(async () => {
                 Year
               </p>
               <p class="col-span-1 text-xs font-semibold text-white uppercase tracking-wide">Sem</p>
-              <p class="col-span-2 text-xs font-semibold text-white uppercase tracking-wide">
-                Status
-              </p>
               <p
                 class="col-span-2 text-right text-xs font-semibold text-white uppercase tracking-wide"
               >
@@ -2033,15 +2171,15 @@ onMounted(async () => {
             </div>
 
             <div
-              v-for="(subject, i) in pagedSubjects"
+              v-for="(subject, i) in allSubjects"
               :key="subject.id"
               :class="[
                 'transition-colors',
-                i !== pagedSubjects.length - 1 ? 'border-b border-gray-100' : '',
+                i !== allSubjects.length - 1 ? 'border-b border-gray-100' : '',
               ]"
             >
               <div class="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-gray-50">
-                <div class="col-span-4 flex items-center gap-3 min-w-0">
+                <div class="col-span-6 flex items-center gap-3 min-w-0">
                   <img
                     v-if="subject.subject_url"
                     :src="subject.subject_url"
@@ -2069,12 +2207,6 @@ onMounted(async () => {
                 </p>
                 <p class="col-span-1 text-sm text-gray-500">I{{ subject.year_level }}</p>
                 <p class="col-span-1 text-sm text-gray-500">{{ subject.semester ?? '—' }}</p>
-                <div class="col-span-2">
-                  <span
-                    :class="`text-xs font-semibold px-2.5 py-1 rounded-full capitalize ${statusStyle[subject.status] ?? 'bg-gray-100 text-gray-500'}`"
-                    >{{ subject.status }}</span
-                  >
-                </div>
                 <div class="col-span-2 flex items-center justify-end">
                   <RowActionsMenu
                     :disabled="deletingAdminSubjectId === subject.id"
@@ -2093,13 +2225,13 @@ onMounted(async () => {
             <Pagination
               class="col-start-2 justify-self-center"
               v-model:page="subjectPage"
-              :total="allSubjects.length"
+              :total="subjectTotal"
               :page-size="subjectPageSize"
             />
             <PageSizeSelect
               class="col-start-3 justify-self-end"
               v-model="subjectPageSize"
-              :total="allSubjects.length"
+              :total="subjectTotal"
               :options="PAGE_SIZE_OPTIONS"
               direction="up"
             />
@@ -2112,27 +2244,34 @@ onMounted(async () => {
         <template v-else-if="activeTab === 'users'">
           <div class="flex items-center justify-between flex-wrap gap-3">
             <p class="text-sm text-gray-500">
-              <span class="font-semibold text-gray-900">{{ users.length }}</span> users
+              <span class="font-semibold text-gray-900">{{ userTotal }}</span> users
             </p>
-            <div class="relative">
-              <svg
-                class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+            <div class="flex items-center gap-3">
+              <div class="relative">
+                <svg
+                  class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+                <input
+                  v-model="userSearch"
+                  type="text"
+                  placeholder="Search by name or email..."
+                  class="pl-9 pr-4 py-2 text-sm border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-primary w-64"
                 />
-              </svg>
-              <input
-                v-model="userSearch"
-                type="text"
-                placeholder="Search by name or email..."
-                class="pl-9 pr-4 py-2 text-sm border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-primary w-64"
+              </div>
+              <FilterDashboard
+                v-model="userStatusFilter"
+                :options="USER_STATUS_OPTIONS"
+                all-label="All users"
               />
             </div>
           </div>
@@ -2149,35 +2288,43 @@ onMounted(async () => {
               <p class="col-span-4 text-xs font-semibold text-white uppercase tracking-wide">
                 Name
               </p>
-              <p class="col-span-3 text-xs font-semibold text-white uppercase tracking-wide">
+              <p
+                class="col-span-3 text-center text-xs font-semibold tracking-wide text-white uppercase"
+              >
                 Email
               </p>
-              <p class="col-span-1 text-xs font-semibold text-white uppercase tracking-wide">
+              <p
+                class="col-span-1 text-center text-xs font-semibold tracking-wide text-white uppercase"
+              >
                 Major
               </p>
-              <p class="col-span-2 text-xs font-semibold text-white uppercase tracking-wide">
+              <p
+                class="col-span-2 text-center text-xs font-semibold tracking-wide text-white uppercase"
+              >
                 Moderates
               </p>
-              <p class="col-span-1 text-xs font-semibold text-white uppercase tracking-wide">
+              <p
+                class="col-span-1 text-center text-xs font-semibold tracking-wide text-white uppercase"
+              >
                 Role
               </p>
               <p
-                class="col-span-1 text-xs font-semibold text-white uppercase tracking-wide text-right"
+                class="col-span-1 text-center text-xs font-semibold tracking-wide text-white uppercase"
               >
                 Actions
               </p>
             </div>
 
             <div v-if="users.length === 0" class="text-center py-12 text-gray-400 text-sm">
-              No users found.
+              {{ userStatusFilter === 'banned' ? 'No banned users.' : 'No users found.' }}
             </div>
 
             <div
-              v-for="(user, i) in pagedUsers"
+              v-for="(user, i) in users"
               :key="user.id"
               :class="[
                 'grid grid-cols-12 gap-4 px-6 py-3.5 items-center hover:bg-gray-50 transition-colors',
-                i !== pagedUsers.length - 1 ? 'border-b border-gray-100' : '',
+                i !== users.length - 1 ? 'border-b border-gray-100' : '',
               ]"
             >
               <div class="col-span-4 flex items-center gap-3 min-w-0">
@@ -2193,8 +2340,8 @@ onMounted(async () => {
                   >
                 </p>
               </div>
-              <p class="col-span-3 text-sm text-gray-500 truncate">{{ user.email }}</p>
-              <p class="col-span-1 text-xs text-gray-500">
+              <p class="col-span-3 truncate text-center text-sm text-gray-500">{{ user.email }}</p>
+              <p class="col-span-1 text-center text-xs text-gray-500">
                 {{ user.majors?.acronym ?? '—'
                 }}<span v-if="user.year_level" class="text-gray-400">
                   · Y{{ user.year_level }}</span
@@ -2203,7 +2350,7 @@ onMounted(async () => {
 
               <!-- Departments this person reviews. Admins review everything, so
                    an assignment would add nothing. -->
-              <div class="col-span-2 flex flex-wrap gap-1">
+              <div class="col-span-2 flex flex-wrap items-center justify-center gap-1">
                 <span v-if="user.role === 'admin'" class="text-xs text-gray-400">all</span>
                 <span
                   v-for="dept in user.moderates ?? []"
@@ -2216,7 +2363,7 @@ onMounted(async () => {
                 <span v-else class="text-xs text-gray-300">—</span>
               </div>
 
-              <div class="col-span-1 flex">
+              <div class="col-span-1 flex justify-center">
                 <span
                   :class="[
                     'text-xs font-semibold px-2.5 py-1 rounded-full',
@@ -2234,7 +2381,7 @@ onMounted(async () => {
 
               <!-- Actions. Hidden on your own row: the API refuses self-demotion
                    and self-banning, so offering them would only produce errors. -->
-              <div class="col-span-1 flex items-center justify-end gap-1">
+              <div class="col-span-1 flex items-center justify-center gap-1">
                 <template v-if="user.id !== auth.user?.id">
                   <RingSpinner
                     v-if="busyUserId === user.id"
@@ -2243,93 +2390,48 @@ onMounted(async () => {
                     class="text-primary"
                   />
                   <template v-else>
-                    <!-- Moderator departments -->
-                    <div class="relative">
-                      <button
-                        type="button"
-                        class="rounded-lg p-1.5 text-gray-400 transition hover:bg-gray-100 hover:text-primary hover:cursor-pointer disabled:opacity-40"
-                        :disabled="user.role === 'admin' || !!user.banned_at"
-                        title="Moderator departments"
-                        @click="moderatorMenuFor = moderatorMenuFor === user.id ? null : user.id"
-                      >
-                        <svg
-                          class="h-4 w-4"
-                          fill="none"
-                          stroke="currentColor"
-                          stroke-width="1.8"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                          />
-                        </svg>
-                      </button>
-
-                      <div
-                        v-if="moderatorMenuFor === user.id"
-                        class="absolute right-0 z-20 mt-1 w-48 rounded-xl border border-gray-200 bg-white py-1 shadow-lg"
-                      >
-                        <p
-                          class="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400"
-                        >
-                          Moderates
-                        </p>
-                        <!-- The department list grows with the institute, so it
-                             scrolls rather than running off the card. The label
-                             stays outside it: you should still be able to see
-                             what you are picking once the list has moved. -->
-                        <div class="max-h-56 overflow-y-auto scrollbar-hide">
-                          <button
-                            v-for="major in majors"
-                            :key="major.id"
-                            type="button"
-                            class="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-gray-700 transition hover:bg-gray-50 hover:cursor-pointer"
-                            @click="toggleModerator(user, major.id)"
-                          >
-                            {{ major.acronym }}
-                            <svg
-                              v-if="moderates(user, major.id)"
-                              class="h-4 w-4 text-primary"
-                              fill="none"
-                              stroke="currentColor"
-                              stroke-width="2.5"
-                              viewBox="0 0 24 24"
-                            >
-                              <path
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                d="M5 13l4 4L19 7"
-                              />
-                            </svg>
-                          </button>
-                        </div>
-                      </div>
+                    <!-- The department picker. Opened from the row menu's
+                         "Promote to moderator"; it has no trigger of its own,
+                         because a tick icon beside a 3-dot menu was two
+                         controls for what reads as one. -->
+                    <!-- The department picker is teleported to <body> and
+                         anchored to this element: an absolutely-positioned
+                         child was clipped by the table's own scroll box, so a
+                         row near the bottom lost half the department list with
+                         no way to reach it. -->
+                    <div :data-user-row="user.id">
+                      <RowActionsMenu
+                        :items="[
+                          { key: 'placement', label: 'Change department and year' },
+                          ...(user.role === 'admin' || user.banned_at
+                            ? []
+                            : [
+                                {
+                                  key: 'moderator',
+                                  label: user.moderates?.length
+                                    ? 'Moderator departments'
+                                    : 'Promote to moderator',
+                                },
+                              ]),
+                          ...(user.role === 'admin'
+                            ? [{ key: 'role', label: 'Remove admin' }]
+                            : []),
+                          ...(user.moderates?.length
+                            ? [
+                                {
+                                  key: 'remove-moderator',
+                                  label: 'Remove as moderator',
+                                  tone: 'danger' as const,
+                                },
+                              ]
+                            : []),
+                          user.banned_at
+                            ? { key: 'unban', label: 'Reinstate', tone: 'success' as const }
+                            : { key: 'ban', label: 'Ban', tone: 'danger' as const },
+                        ]"
+                        @select="(key) => onUserAction(key, user)"
+                      />
                     </div>
-
-                    <!-- Single actions collapse into one menu; the moderator
-                         picker above stays its own control because it is a
-                         multi-select submenu, not one action. -->
-                    <RowActionsMenu
-                      :items="[
-                        { key: 'placement', label: 'Change department and year' },
-                        ...(user.role === 'admin' ? [{ key: 'role', label: 'Remove admin' }] : []),
-                        ...(user.moderates?.length
-                          ? [
-                              {
-                                key: 'remove-moderator',
-                                label: 'Remove as moderator',
-                                tone: 'danger' as const,
-                              },
-                            ]
-                          : []),
-                        user.banned_at
-                          ? { key: 'unban', label: 'Reinstate', tone: 'success' as const }
-                          : { key: 'ban', label: 'Ban', tone: 'danger' as const },
-                      ]"
-                      @select="(key) => onUserAction(key, user)"
-                    />
                   </template>
                 </template>
               </div>
@@ -2340,13 +2442,13 @@ onMounted(async () => {
             <Pagination
               class="col-start-2 justify-self-center"
               v-model:page="userPage"
-              :total="users.length"
+              :total="userTotal"
               :page-size="userPageSize"
             />
             <PageSizeSelect
               class="col-start-3 justify-self-end"
               v-model="userPageSize"
-              :total="users.length"
+              :total="userTotal"
               :options="PAGE_SIZE_OPTIONS"
               direction="up"
             />
@@ -2382,7 +2484,7 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div class="mt-5 rounded-2xl border border-gray-100 bg-white overflow-hidden">
+          <div class="rounded-2xl border border-gray-100 bg-white overflow-hidden">
             <div class="grid grid-cols-12 gap-4 bg-primary px-6 py-3">
               <p class="col-span-4 text-xs font-semibold text-white uppercase tracking-wide">
                 Title
@@ -2634,17 +2736,21 @@ onMounted(async () => {
         <!-- ════════════════════════════════════════════════════════════════ -->
         <template v-else-if="activeTab === 'documents'">
           <div class="flex items-center justify-end flex-wrap gap-3">
-            <SearchDashboard v-model="docSearch" placeholder="Search by name..." width="w-52" />
+            <!-- Wider than before: it carries what the uploader dropdown used
+                 to, so the placeholder has to say so without truncating. -->
+            <SearchDashboard
+              v-model="docSearch"
+              placeholder="Search title or uploader..."
+              width="w-64"
+            />
             <FilterDashboard
               v-model="docMajorFilter"
               :options="majorOptions"
               all-label="All departments"
             />
-            <FilterDashboard
-              v-model="docUploaderFilter"
-              :options="uploaderOptions"
-              all-label="All uploaders"
-            />
+            <!-- No all-label: every upload here is one or the other, and the
+                 two cannot usefully be shown together. -->
+            <FilterDashboard v-model="docStatusFilter" :options="DOC_STATUS_OPTIONS" />
             <FilterDashboard
               v-model="docTypeFilter"
               :options="docTypeOptions"
@@ -2663,139 +2769,194 @@ onMounted(async () => {
 
           <div v-if="docsLoading" class="flex justify-center py-24"><LoadingSpinner /></div>
 
+          <!-- Same shape as the Approvals table: overflow-auto plus a fixed
+               column template and a min-width, so a narrow window scrolls
+               sideways rather than crushing eight columns. min-w-0 lets the
+               card shrink to the page instead of widening it — a flex item
+               defaults to min-width:auto, which here would be the grid's own
+               1512px. -->
           <div
             v-else
-            class="min-h-0 overflow-y-auto overscroll-none bg-white rounded-2xl border border-gray-100"
+            class="min-w-0 overflow-auto overscroll-none rounded-2xl border border-gray-100 bg-white"
           >
-            <div
-              class="sticky top-0 z-20 grid grid-cols-14 gap-4 border-b border-gray-100 bg-primary px-6 py-3"
-            >
-              <p class="col-span-3 text-xs font-semibold text-white uppercase tracking-wide">
-                Document
-              </p>
-              <p class="col-span-1 text-xs font-semibold text-white uppercase tracking-wide">
-                Type
-              </p>
-              <p class="col-span-2 text-xs font-semibold text-white uppercase tracking-wide">
-                Subject
-              </p>
-              <p class="col-span-1 text-xs font-semibold text-white uppercase tracking-wide">
-                Major
-              </p>
-              <p class="col-span-2 text-xs font-semibold text-white uppercase tracking-wide">
-                Uploader
-              </p>
-              <p class="col-span-2 text-xs font-semibold text-white uppercase tracking-wide">
-                Approved by
-              </p>
-              <p class="col-span-2 text-xs font-semibold text-white uppercase tracking-wide">
-                Date
-              </p>
-              <p
-                class="col-span-1 text-right text-xs font-semibold text-white uppercase tracking-wide"
-              >
-                Actions
-              </p>
-            </div>
-
-            <div v-if="allDocs.length === 0" class="text-center py-12 text-gray-400 text-sm">
-              No documents found.
-            </div>
-
-            <div
-              v-for="(doc, i) in pagedDocs"
-              :key="doc.id"
-              :class="i !== pagedDocs.length - 1 ? 'border-b border-gray-100' : ''"
-            >
-              <!-- ── Upload row (click to expand) ── -->
+            <div class="min-w-[1512px]">
               <div
-                :class="[
-                  'grid grid-cols-14 gap-4 px-6 py-3.5 items-center transition-colors cursor-pointer',
-                  expandedUploads.has(doc.id) ? 'bg-primary/10' : 'hover:bg-primary/5',
-                ]"
-                @click="toggleUpload(doc.id)"
+                class="sticky top-0 z-20 grid grid-cols-[minmax(240px,2fr)_120px_130px_100px_140px_140px_110px_140px_110px_90px] items-center gap-4 border-b border-gray-100 bg-primary px-6 py-3"
               >
-                <div class="col-span-3 min-w-0 flex items-center gap-2">
-                  <svg
-                    class="h-4 w-4 text-gray-400 shrink-0 transition-transform duration-200"
-                    :class="expandedUploads.has(doc.id) ? 'rotate-90' : ''"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M9 5l7 7-7 7"
-                    />
-                  </svg>
-                  <FolderIcon class="h-9 w-9 text-primary" />
-                  <p class="min-w-0 truncate text-sm font-medium text-gray-900">
-                    {{ doc.title }}
-                  </p>
-                </div>
-
-                <div class="col-span-1 min-w-0">
-                  <span
-                    class="inline-block max-w-full truncate rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
-                  >
-                    {{ doc.doc_type }}
-                  </span>
-                </div>
-                <p class="col-span-2 truncate text-sm text-gray-600">
-                  {{ doc.subjects?.name ?? '—' }}
+                <p class="text-xs font-semibold tracking-wide text-white uppercase">Document</p>
+                <p class="text-center text-xs font-semibold tracking-wide text-white uppercase">
+                  Type
                 </p>
-                <p class="col-span-1 truncate text-sm text-gray-600">
-                  {{ yearMajorLabel(doc.majors?.acronym, doc.year_level) }}
+                <p class="text-center text-xs font-semibold tracking-wide text-white uppercase">
+                  Subject
                 </p>
-                <p class="col-span-2 truncate text-sm text-gray-600">
-                  {{ doc.users?.first_name }} {{ doc.users?.last_name }}
-                </p>
-                <p class="col-span-2 truncate text-sm text-gray-600">
-                  <template v-if="doc.approved_by">
-                    {{ doc.approved_by.first_name }} {{ doc.approved_by.last_name }}
-                  </template>
-                  <span v-else class="text-gray-400">&mdash;</span>
+                <p class="text-center text-xs font-semibold tracking-wide text-white uppercase">
+                  Major
                 </p>
                 <p
-                  class="col-span-2 whitespace-nowrap text-xs text-gray-400"
-                  :title="`${formatSize(totalSize(doc.documents))} · ${formatDate(doc.uploaded_at)}`"
+                  class="text-center text-xs font-semibold tracking-wide whitespace-nowrap text-white uppercase"
                 >
-                  {{ formatDate(doc.uploaded_at) }}
+                  Academic year
                 </p>
-                <div class="col-span-1 flex justify-end" @click.stop>
-                  <RowActionsMenu
-                    :disabled="deletingDocId === doc.id"
-                    :items="[{ key: 'delete', label: 'Delete', tone: 'danger' }]"
-                    @select="deleteDocument(doc)"
-                  />
-                </div>
+                <p class="text-center text-xs font-semibold tracking-wide text-white uppercase">
+                  Uploader
+                </p>
+                <p class="text-center text-xs font-semibold tracking-wide text-white uppercase">
+                  Status
+                </p>
+                <!-- "Reviewed by", not "Approved by": the same column names
+                     whoever REJECTED a row, and the Status beside it now makes
+                     that plain. -->
+                <p
+                  class="text-center text-xs font-semibold tracking-wide whitespace-nowrap text-white uppercase"
+                >
+                  Reviewed by
+                </p>
+                <p class="text-center text-xs font-semibold tracking-wide text-white uppercase">
+                  Date
+                </p>
+                <p class="text-center text-xs font-semibold tracking-wide text-white uppercase">
+                  Actions
+                </p>
               </div>
 
-              <!-- ── Expanded file list ── -->
+              <div v-if="allDocs.length === 0" class="text-center py-12 text-gray-400 text-sm">
+                No documents found.
+              </div>
+
               <div
-                v-if="expandedUploads.has(doc.id)"
-                class="bg-primary/10 border-gray-100 pl-22 pr-6"
+                v-for="(doc, i) in allDocs"
+                :key="doc.id"
+                :class="i !== allDocs.length - 1 ? 'border-b border-gray-100' : ''"
               >
-                <button
-                  v-for="file in doc.documents"
-                  :key="file.id"
-                  type="button"
-                  class="flex w-full items-center gap-3 border-b border-gray-300 py-2 text-left last:border-0 hover:cursor-pointer"
-                  @click.stop="openPreview(file)"
+                <!-- ── Upload row (click to expand) ── -->
+                <div
+                  :class="[
+                    'grid grid-cols-[minmax(240px,2fr)_120px_130px_100px_140px_140px_110px_140px_110px_90px] items-center gap-4 px-6 py-3.5 transition-colors cursor-pointer',
+                    expandedUploads.has(doc.id) ? 'bg-primary/10' : 'hover:bg-primary/5',
+                  ]"
+                  @click="toggleUpload(doc.id)"
                 >
-                  <FilePreviewThumb
-                    :name="file.original_name"
-                    :url="file.file_url"
-                    :preview-url="file.preview_url"
-                    :size="28"
-                  />
-                  <p class="flex-1 truncate text-sm text-gray-700 hover:text-primary">
-                    {{ file.original_name ?? '—' }}
+                  <div class="flex min-w-0 items-center gap-2">
+                    <svg
+                      class="h-4 w-4 text-gray-400 shrink-0 transition-transform duration-200"
+                      :class="expandedUploads.has(doc.id) ? 'rotate-90' : ''"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M9 5l7 7-7 7"
+                      />
+                    </svg>
+                    <FolderIcon class="h-9 w-9 text-primary" />
+                    <p class="min-w-0 truncate text-sm font-medium text-gray-900">
+                      {{ doc.title }}
+                    </p>
+                  </div>
+
+                  <div class="flex min-w-0 justify-center">
+                    <span
+                      class="inline-block max-w-full truncate rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
+                    >
+                      {{ doc.doc_type }}
+                    </span>
+                  </div>
+                  <p class="truncate text-center text-sm text-gray-600">
+                    {{ doc.subjects?.name ?? '—' }}
                   </p>
-                  <p class="shrink-0 text-xs text-gray-400">{{ formatSize(file.file_size_kb) }}</p>
-                </button>
+                  <p class="truncate text-center text-sm text-gray-600">
+                    {{ yearMajorLabel(doc.majors?.acronym, doc.year_level) }}
+                  </p>
+                  <p class="text-center text-sm whitespace-nowrap text-gray-600">
+                    {{ doc.academic_year ?? '—' }}
+                  </p>
+                  <p class="truncate text-center text-sm text-gray-600">
+                    {{ doc.users?.first_name }} {{ doc.users?.last_name }}
+                  </p>
+                  <div class="flex min-w-0 justify-center">
+                    <span
+                      class="inline-block max-w-full truncate rounded-full px-2 py-0.5 text-xs font-medium"
+                      :class="DOC_STATUS_TONE[docDisplayStatus(doc)]"
+                    >
+                      {{ docStatusLabel(doc) }}
+                    </span>
+                  </div>
+                  <p class="truncate text-center text-sm text-gray-600">
+                    <template v-if="doc.approved_by">
+                      {{ doc.approved_by.first_name }} {{ doc.approved_by.last_name }}
+                    </template>
+                    <span v-else class="text-gray-400">&mdash;</span>
+                  </p>
+                  <p
+                    class="text-center text-xs whitespace-nowrap text-gray-400"
+                    :title="`${formatSize(totalSize(doc.documents))} · ${formatDate(doc.uploaded_at)}`"
+                  >
+                    {{ formatDate(doc.uploaded_at) }}
+                  </p>
+                  <div class="flex justify-center" @click.stop>
+                    <RowActionsMenu
+                      :disabled="deletingDocId === doc.id"
+                      :items="[{ key: 'delete', label: 'Delete', tone: 'danger' }]"
+                      @select="docToDelete = doc"
+                    />
+                  </div>
+                </div>
+
+                <!-- ── Expanded file list ── -->
+                <div
+                  v-if="expandedUploads.has(doc.id)"
+                  class="bg-primary/10 border-gray-100 pl-22 pr-6"
+                >
+                  <button
+                    v-for="file in doc.documents"
+                    :key="file.id"
+                    type="button"
+                    class="flex w-full items-center gap-3 border-b border-gray-300 py-2 text-left last:border-0 hover:cursor-pointer"
+                    @click.stop="openPreview(file)"
+                  >
+                    <FilePreviewThumb
+                      :name="file.original_name"
+                      :url="file.file_url"
+                      :preview-url="file.preview_url"
+                      :size="28"
+                    />
+                    <p class="flex-1 truncate text-sm text-gray-700 hover:text-primary">
+                      {{ file.original_name ?? '—' }}
+                    </p>
+                    <p class="shrink-0 text-xs text-gray-400">
+                      {{ formatSize(file.file_size_kb) }}
+                    </p>
+                  </button>
+
+                  <!-- Properties of the upload, not of any one file, so they
+                       sit once beneath the list — the same footer the review
+                       queue shows. Both matter when auditing: who the material
+                       reaches, and whether it stops being visible on a date. -->
+                  <div
+                    class="mt-3 flex flex-wrap items-center justify-start gap-x-6 gap-y-1 pt-1 pb-2 text-xs text-gray-500"
+                  >
+                    <p>
+                      <span class="font-semibold text-gray-600">Visible to:</span>
+                      {{ audienceLabel(doc.audience ?? []) }}
+                    </p>
+                    <p>
+                      <span class="font-semibold text-gray-600">Expires:</span>
+                      {{ formatExpiry(doc.expires_at) ?? 'Never' }}
+                    </p>
+                    <!-- Its own line, not another chip on the row above: a
+                         reason is free text and can run long, and wrapping it
+                         between two short labelled values makes all three hard
+                         to read. basis-full breaks the flex line before it. -->
+                    <p v-if="doc.rejection_reason" class="basis-full break-words text-red-700">
+                      <span class="font-semibold">Reason:</span>
+                      {{ doc.rejection_reason }}
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2804,13 +2965,13 @@ onMounted(async () => {
             <Pagination
               class="col-start-2 justify-self-center"
               v-model:page="docPage"
-              :total="allDocs.length"
+              :total="docTotal"
               :page-size="docPageSize"
             />
             <PageSizeSelect
               class="col-start-3 justify-self-end"
               v-model="docPageSize"
-              :total="allDocs.length"
+              :total="docTotal"
               :options="PAGE_SIZE_OPTIONS"
               direction="up"
             />
@@ -2846,9 +3007,7 @@ onMounted(async () => {
     >
       <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 flex flex-col gap-4">
         <div class="flex items-center justify-between">
-          <h3 class="text-base font-semibold text-gray-900">
-            Reject {{ rejectModal.type === 'subject' ? 'Subject' : 'Document' }}
-          </h3>
+          <h3 class="text-base font-semibold text-gray-900">Reject Document</h3>
           <button
             @click="closeRejectModal"
             class="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
@@ -2865,11 +3024,14 @@ onMounted(async () => {
         </div>
         <div class="flex flex-col gap-1.5">
           <label class="text-sm font-medium text-gray-700"
-            >Reason <span class="text-gray-400 font-normal">(optional)</span></label
+            >Reason <span class="font-normal text-red-500">*</span></label
           >
+          <!-- maxlength matches RejectDto's 300, so the cap is hit while typing
+               rather than as a 400 after pressing Confirm. -->
           <textarea
             v-model="rejectReason"
             rows="3"
+            maxlength="300"
             placeholder="e.g. Duplicate content, missing information, inappropriate..."
             class="w-full px-3 py-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-300 resize-none"
           />
@@ -2886,8 +3048,8 @@ onMounted(async () => {
           </button>
           <button
             @click="confirmReject"
-            :disabled="rejecting"
-            class="px-4 py-2 text-sm font-semibold bg-red-500 hover:bg-red-600 text-white rounded-xl transition-colors disabled:opacity-50"
+            :disabled="rejecting || !rejectReason.trim()"
+            class="px-4 py-2 text-sm font-semibold bg-red-500 hover:bg-red-600 text-white rounded-xl transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
             {{ rejecting ? 'Rejecting…' : 'Confirm Reject' }}
           </button>
@@ -2896,7 +3058,64 @@ onMounted(async () => {
     </div>
   </Transition>
 
+  <!-- Department picker — one panel, not one per row: only ever a single user
+       is being edited, and teleporting it out of the table is what stops the
+       scroll box from clipping it. -->
+  <Teleport to="body">
+    <div
+      v-if="moderatorMenuUser"
+      ref="moderatorPanel"
+      data-moderator-menu
+      :style="moderatorPanelStyle"
+      class="fixed z-[100] w-48 rounded-xl border border-gray-200 bg-white py-1 shadow-lg"
+    >
+      <p class="px-3 py-1.5 text-[11px] font-semibold tracking-wide text-gray-400 uppercase">
+        Moderates
+      </p>
+      <!-- The department list grows with the institute, so it scrolls rather
+           than running off the panel. The label stays outside it: you should
+           still be able to see what you are picking once the list has moved. -->
+      <div class="max-h-56 overflow-y-auto scrollbar-hide">
+        <button
+          v-for="major in majors"
+          :key="major.id"
+          type="button"
+          class="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-gray-700 transition hover:cursor-pointer hover:bg-gray-50"
+          @click="toggleModerator(moderatorMenuUser, major.id)"
+        >
+          {{ major.acronym }}
+          <svg
+            v-if="moderates(moderatorMenuUser, major.id)"
+            class="h-4 w-4 text-primary"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            viewBox="0 0 24 24"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  </Teleport>
+
   <!-- Banning cuts the person's access, so it asks first. Unbanning doesn't. -->
+  <ConfirmDeleteModal
+    v-if="docToDelete"
+    :target="docToDelete.title"
+    :loading="deletingDocId === docToDelete.id"
+    @cancel="docToDelete = null"
+    @confirm="deleteDocument"
+  />
+
+  <ConfirmDeleteModal
+    v-if="subjectToDelete"
+    :target="subjectToDelete.name"
+    :loading="deletingAdminSubjectId === subjectToDelete.id"
+    @cancel="subjectToDelete = null"
+    @confirm="deleteAdminSubject"
+  />
+
   <ConfirmDeleteModal
     v-if="banTarget"
     :target="banTarget.name"

@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { onMounted, reactive, ref } from 'vue'
+import PasswordField from '@/components/base/PasswordField.vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth.store'
@@ -132,14 +133,15 @@ onMounted(() => {
           <label for="password" class="text-sm font-semibold text-gray-600">{{
             t('auth.login.password')
           }}</label>
-          <input
-            @blur="validatePassword"
-            type="password"
+          <PasswordField
+            v-model="form.password"
             id="password"
             name="password"
+            autocomplete="current-password"
             :placeholder="t('auth.login.enterPassword')"
-            v-model="form.password"
-            class="mt-1.5 w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+            wrapper-class="mt-1.5"
+            class="w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary"
+            @blur="validatePassword"
           />
           <div class="mt-1 flex items-center justify-between gap-2">
             <p class="text-sm text-red-500">{{ errors.password ? t(errors.password) : '' }}</p>

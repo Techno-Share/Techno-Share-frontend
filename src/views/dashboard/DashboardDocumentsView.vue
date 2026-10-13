@@ -263,9 +263,11 @@ onMounted(() => {
             :doc="doc"
             :file-count="doc.documents?.length ?? 1"
             show-owner-columns
+            highlight-pending
             @deleted="loadDocs"
             @hidden-changed="loadDocs"
             @pinned-changed="loadDocs"
+            @edit="openEdit"
           />
         </div>
       </div>
@@ -277,7 +279,7 @@ onMounted(() => {
         v-for="doc in myDocs"
         :key="doc.id"
         :doc="doc"
-        :file-count="doc.documents?.length ?? 1"
+        highlight-pending
         @deleted="loadDocs"
         @hidden-changed="loadDocs"
         @pinned-changed="loadDocs"

@@ -54,6 +54,12 @@ export interface UploadFile {
    * file also hides its upload; only the uploader and admins are served one.
    */
   hidden_at: string | null
+  /**
+   * When this file was attached — its own date, not its upload's. Optional
+   * because rows written before AddDocumentCreatedAt reached older clients
+   * without it; the UI falls back to the upload's date.
+   */
+  created_at?: string | null
 }
 
 /** `GET /documents/mine` omits `file_url` — the dashboard only lists names and sizes. */

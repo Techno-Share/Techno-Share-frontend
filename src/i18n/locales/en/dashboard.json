@@ -3,9 +3,7 @@
     "nav": {
       "activity": "Dashboard",
       "documents": "Documents",
-      "review": "Review submissions",
-      "reviewSubjects": "Subjects",
-      "reviewDocuments": "Documents"
+      "review": "Review submissions"
     },
     "filters": {
       "yourBook": "My books",
@@ -31,7 +29,6 @@
     "dashboard-books-approve": "Approve requests",
     "dashboard-books-reserved": "Reserved books",
     "dashboard-books-requesting": "My requests",
-    "dashboard-review-subjects": "Review subjects",
     "dashboard-review-documents": "Review documents"
   },
   "activity": {

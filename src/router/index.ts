@@ -93,12 +93,6 @@ const routes = [
            * they may review is still decided entirely by the server.
            */
           {
-            path: 'review/subjects',
-            name: 'dashboard-review-subjects',
-            component: () => import('@/views/dashboard/DashboardReviewView.vue'),
-            meta: { requiresReviewer: true },
-          },
-          {
             path: 'review/documents',
             name: 'dashboard-review-documents',
             component: () => import('@/views/dashboard/DashboardReviewView.vue'),
@@ -116,7 +110,7 @@ const routes = [
           },
           // The bare path kept as a redirect: anything already pointing at
           // /dashboard/review still lands somewhere useful.
-          { path: 'review', redirect: { name: 'dashboard-review-subjects' } },
+          { path: 'review', redirect: { name: 'dashboard-review-documents' } },
           {
             path: 'books/requesting',
             name: 'dashboard-books-requesting',

@@ -23,16 +23,16 @@
           </button>
 
           <!-- Desktop Logo -->
-          <router-link to="/" class="hidden md:block text-xl font-bold">Logo</router-link>
+          <router-link to="/" class="hidden md:block">
+            <img :src="logoUrl" alt="ITC Sharing" class="h-9 w-auto object-contain" />
+          </router-link>
         </div>
 
         <!-- Center Section -->
         <!-- Mobile Logo -->
-        <router-link
-          to="/"
-          class="md:hidden absolute left-1/2 transform -translate-x-1/2 text-xl font-bold"
-          >Logo</router-link
-        >
+        <router-link to="/" class="md:hidden absolute left-1/2 transform -translate-x-1/2">
+          <img :src="logoUrl" alt="ITC Sharing" class="h-9 w-auto object-contain" />
+        </router-link>
 
         <!-- Desktop Menu -->
         <ul
@@ -232,6 +232,7 @@
 </template>
 
 <script setup lang="ts">
+import logoUrl from '@/assets/images/techno_share_logo_trimmed.png'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ButtonPrimary from '@/components/base/ButtonPrimary.vue'
 import NotificationBell from '@/components/notifications/NotificationBell.vue'

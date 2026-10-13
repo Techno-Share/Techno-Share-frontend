@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useAnchoredPanel } from '@/composables/useAnchoredPanel'
+import CalendarPicker from '@/components/base/CalendarPicker.vue'
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -17,7 +19,38 @@ const emit = defineEmits<{ (e: 'update:modelValue', v: string): void }>()
 
 const text = ref('') // what's shown/typed: 'dd/mm/yyyy'
 const error = ref('')
-const dateInput = ref<HTMLInputElement | null>(null)
+
+/** Our own calendar panel, in place of the browser's. */
+const pickerOpen = ref(false)
+const root = ref<HTMLElement | null>(null)
+const panel = ref<HTMLElement | null>(null)
+/** The field itself — what the floating panel is positioned against. */
+const anchor = ref<HTMLElement | null>(null)
+
+const { style: panelStyle } = useAnchoredPanel(pickerOpen, anchor, panel)
+
+/**
+ * Close on a click anywhere else.
+ *
+ * Bound only while the panel is open, and on `mousedown` rather than `click`:
+ * a click that lands on a day fires after the panel has already emitted its
+ * selection, and listening for it would close on the way back up regardless.
+ * The panel itself stops propagation, so this only ever sees outside clicks.
+ */
+function onDocumentDown(e: MouseEvent) {
+  const target = e.target as Node
+  // The panel is teleported out of `root`, so it has to be asked separately —
+  // without this, clicking a day would close the picker before it registered.
+  if (root.value?.contains(target) || panel.value?.contains(target)) return
+  pickerOpen.value = false
+}
+
+watch(pickerOpen, (open) => {
+  if (open) document.addEventListener('mousedown', onDocumentDown)
+  else document.removeEventListener('mousedown', onDocumentDown)
+})
+
+onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentDown))
 
 function isoToDisplay(iso: string): string {
   const [y, m, d] = (iso || '').split('-')
@@ -97,25 +130,27 @@ function onBlur() {
   }
 }
 
-function openPicker() {
-  dateInput.value?.showPicker?.()
+function togglePicker() {
+  pickerOpen.value = !pickerOpen.value
 }
 
-function onPick(e: Event) {
+/** A day chosen in the calendar. */
+function onCalendarPick(iso: string) {
   error.value = ''
-  emit('update:modelValue', (e.target as HTMLInputElement).value)
+  emit('update:modelValue', iso)
 }
 
 function clear() {
   text.value = ''
   error.value = ''
+  pickerOpen.value = false
   emit('update:modelValue', '')
 }
 </script>
 
 <template>
-  <div>
-    <div class="relative">
+  <div ref="root">
+    <div ref="anchor" class="relative">
       <input
         :value="text"
         @input="onInput"
@@ -133,7 +168,7 @@ function clear() {
       <button
         v-if="text"
         type="button"
-        class="absolute right-9 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+        class="absolute right-9 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-600 hover:cursor-pointer"
         aria-label="Clear"
         @click="clear"
       >
@@ -151,9 +186,10 @@ function clear() {
       <!-- Calendar picker -->
       <button
         type="button"
-        class="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-gray-500 hover:text-primary"
+        class="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-gray-500 hover:text-primary hover:cursor-pointer"
+        :aria-expanded="pickerOpen"
         aria-label="Open calendar"
-        @click="openPicker"
+        @click="togglePicker"
       >
         <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path
@@ -163,20 +199,21 @@ function clear() {
           />
         </svg>
       </button>
-
-      <!-- Hidden native date input backing the calendar (rendered, not display:none,
-         so showPicker() is allowed). -->
-      <input
-        ref="dateInput"
-        type="date"
-        :min="min"
-        :value="modelValue"
-        tabindex="-1"
-        aria-hidden="true"
-        class="pointer-events-none absolute right-2 top-1/2 h-6 w-6 -translate-y-1/2 opacity-0"
-        @change="onPick"
-      />
     </div>
+
+    <!-- Teleported to <body> and positioned fixed, so it paints in front of
+         the dialog instead of being clipped by it. z above every overlay in
+         the app (the modals top out at z-[100]). -->
+    <Teleport to="body">
+      <div v-if="pickerOpen" ref="panel" class="fixed z-[110]" :style="panelStyle">
+        <CalendarPicker
+          :model-value="modelValue"
+          :min="min"
+          @update:model-value="onCalendarPick"
+          @close="pickerOpen = false"
+        />
+      </div>
+    </Teleport>
 
     <p v-if="error" class="mt-1 text-xs text-red-600">{{ error }}</p>
   </div>
