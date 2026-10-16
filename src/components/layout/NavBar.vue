@@ -121,8 +121,14 @@
                 @click="isAccountMenuOpen = false"
                 class="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"
               >
+                <!-- No colour of its own, like the logout icon below: it
+                     strokes with currentColor so it follows the row's text —
+                     grey normally, primary once `.router-link-exact-active`
+                     applies on /dashboard. A hardcoded text-gray-400 here beat
+                     that inheritance and left the icon grey while its own
+                     label turned blue. -->
                 <svg
-                  class="h-4 w-4 text-gray-400"
+                  class="h-4 w-4"
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
