@@ -9,6 +9,7 @@ import {
   audienceLabel as sharedAudienceLabel,
   formatExpiry,
   isExpired,
+  reqInitials,
   yearLevelsForMajor,
   yearMajorLabel,
 } from '@/utils/format'
@@ -22,6 +23,7 @@ import DocumentPreviewModal from '@/components/documents/DocumentPreviewModal.vu
 import type { UploadFile } from '@/types/documents.types'
 import FolderIcon from '@/components/base/FolderIcon.vue'
 import RowActionsMenu from '@/components/base/RowActionsMenu.vue'
+import UserAvatar from '@/components/base/UserAvatar.vue'
 import type { PreviewableFile } from '@/types/documents.types'
 import type { AdminDocument, AdminPendingDocument, AdminUser } from '@/types/admin.types'
 import type { Paginated } from '@/types/api.types'
@@ -29,6 +31,7 @@ import Pagination from '@/components/base/Pagination.vue'
 import PageSizeSelect from '@/components/base/PageSizeSelect.vue'
 import SearchDashboard from '@/components/dashboard/SearchDashboard.vue'
 import FilterDashboard from '@/components/dashboard/FilterDashboard.vue'
+import RefreshButton from '@/components/dashboard/RefreshButton.vue'
 import UploadsBarChart from '@/components/documents/UploadsBarChart.vue'
 import DepartmentBarChart from '@/components/dashboard/DepartmentBarChart.vue'
 import StatusDonutChart from '@/components/dashboard/StatusDonutChart.vue'
@@ -1329,6 +1332,34 @@ watch(activeTab, (tab) => {
   if (tab === 'documents' && !docsLoaded.value) void loadDocuments()
 })
 
+/**
+ * Manual reload for each table, kept apart from the tab's own loading flag.
+ *
+ * Every tab swaps its table for a centred spinner while `*Loading` is true,
+ * which is right on first load and wrong on a refresh — rows that vanish and
+ * come back are the page reload the button exists to avoid. With a second flag
+ * the stale rows stay put and only the icon spins; the spinner branches below
+ * test `loading && !refreshing`.
+ *
+ * Each wraps the tab's existing loader, so the active filters, search and page
+ * are preserved and failures keep reporting through the loader's own toast.
+ */
+const refreshingTab = ref<'approvals' | 'subjects' | 'users' | 'books' | 'documents' | null>(null)
+
+async function refreshTab(
+  tab: 'approvals' | 'subjects' | 'users' | 'books' | 'documents',
+  busy: boolean,
+  load: () => unknown,
+) {
+  if (refreshingTab.value || busy) return
+  refreshingTab.value = tab
+  try {
+    await load()
+  } finally {
+    refreshingTab.value = null
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function formatDate(d: string) {
   return new Date(d).toLocaleDateString('en-GB', {
@@ -2004,7 +2035,12 @@ onMounted(async () => {
         <!-- APPROVALS TAB                                                    -->
         <!-- ════════════════════════════════════════════════════════════════ -->
         <template v-else-if="activeTab === 'approvals'">
-          <div v-if="approvalsLoading" class="flex justify-center py-24"><LoadingSpinner /></div>
+          <div
+            v-if="approvalsLoading && refreshingTab !== 'approvals'"
+            class="flex justify-center py-24"
+          >
+            <LoadingSpinner />
+          </div>
 
           <template v-else>
             <div
@@ -2036,7 +2072,9 @@ onMounted(async () => {
               <!-- Pending Documents -->
               <template v-if="pendingDocGroups.length > 0">
                 <div class="flex flex-wrap items-center gap-2">
-                  <h2 class="font-semibold text-gray-900">Pending Documents</h2>
+                  <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                    Pending Documents
+                  </h2>
                   <span
                     class="text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full"
                     >{{ pendingFiltersActive ? `${filteredDocGroups.length}/` : ''
@@ -2058,6 +2096,13 @@ onMounted(async () => {
                       all-label="All departments"
                     />
                     <FilterDashboard v-model="pendingPeriod" :options="PERIOD_OPTIONS" />
+
+                    <RefreshButton
+                      :refreshing="refreshingTab === 'approvals'"
+                      :loading="approvalsLoading"
+                      label="Refresh approvals"
+                      @refresh="refreshTab('approvals', approvalsLoading, loadApprovals)"
+                    />
 
                     <button
                       v-if="pendingFiltersActive"
@@ -2119,16 +2164,20 @@ onMounted(async () => {
         <!-- ════════════════════════════════════════════════════════════════ -->
         <template v-else-if="activeTab === 'subjects'">
           <div class="flex items-center justify-between flex-wrap gap-3">
-            <p class="text-sm text-gray-500">
-              <span class="font-semibold text-gray-900">{{ subjectTotal }}</span> subjects
+            <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              subjects
+              <span class="text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full">
+                {{ subjectTotal }}
+              </span>
             </p>
             <div class="flex flex-wrap items-center gap-2">
+              <SearchDashboard v-model="subjectSearch" placeholder="Search subjects..." />
+
               <FilterDashboard
                 v-model="subjectMajorFilter"
                 :options="majorOptions"
                 all-label="All departments"
               />
-              <SearchDashboard v-model="subjectSearch" placeholder="Search subjects..." />
 
               <button
                 v-if="subjectFiltersActive"
@@ -2137,10 +2186,22 @@ onMounted(async () => {
               >
                 Clear
               </button>
+
+              <RefreshButton
+                :refreshing="refreshingTab === 'subjects'"
+                :loading="subjectsLoading"
+                label="Refresh subjects"
+                @refresh="refreshTab('subjects', subjectsLoading, loadAllSubjects)"
+              />
             </div>
           </div>
 
-          <div v-if="subjectsLoading" class="flex justify-center py-24"><LoadingSpinner /></div>
+          <div
+            v-if="subjectsLoading && refreshingTab !== 'subjects'"
+            class="flex justify-center py-24"
+          >
+            <LoadingSpinner />
+          </div>
 
           <div
             v-else
@@ -2243,8 +2304,11 @@ onMounted(async () => {
         <!-- ════════════════════════════════════════════════════════════════ -->
         <template v-else-if="activeTab === 'users'">
           <div class="flex items-center justify-between flex-wrap gap-3">
-            <p class="text-sm text-gray-500">
-              <span class="font-semibold text-gray-900">{{ userTotal }}</span> users
+            <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              users:
+              <span class="text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full">{{
+                userTotal
+              }}</span>
             </p>
             <div class="flex items-center gap-3">
               <div class="relative">
@@ -2273,10 +2337,18 @@ onMounted(async () => {
                 :options="USER_STATUS_OPTIONS"
                 all-label="All users"
               />
+              <RefreshButton
+                :refreshing="refreshingTab === 'users'"
+                :loading="usersLoading"
+                label="Refresh users"
+                @refresh="refreshTab('users', usersLoading, loadUsers)"
+              />
             </div>
           </div>
 
-          <div v-if="usersLoading" class="flex justify-center py-24"><LoadingSpinner /></div>
+          <div v-if="usersLoading && refreshingTab !== 'users'" class="flex justify-center py-24">
+            <LoadingSpinner />
+          </div>
 
           <div
             v-else
@@ -2328,10 +2400,18 @@ onMounted(async () => {
               ]"
             >
               <div class="col-span-4 flex items-center gap-3 min-w-0">
+                <!-- UserAvatar rather than a bare <img v-if>: it keeps the
+                     initials as the fallback when the photo fails as well as
+                     when there is none, and sends no Referer — Google profile
+                     photos answer 403 to one, which is most of our accounts. -->
                 <div
-                  class="h-8 w-8 rounded-full bg-[#E8EEF8] flex items-center justify-center text-primary text-xs font-bold shrink-0"
+                  class="h-8 w-8 shrink-0 overflow-hidden rounded-full bg-[#E8EEF8] flex items-center justify-center text-primary text-xs font-bold"
                 >
-                  {{ user.first_name?.[0]?.toUpperCase() }}{{ user.last_name?.[0]?.toUpperCase() }}
+                  <UserAvatar
+                    :src="user.avatar_url"
+                    :initials="reqInitials(user.first_name, user.last_name)"
+                    text-class="text-xs"
+                  />
                 </div>
                 <p class="text-sm font-medium text-gray-900 truncate">
                   {{ user.first_name }} {{ user.last_name }}
@@ -2458,28 +2538,39 @@ onMounted(async () => {
         <!-- ── Books ────────────────────────────────────────────────────── -->
         <template v-else-if="activeTab === 'books'">
           <div class="flex items-center justify-between flex-wrap gap-3">
-            <p class="text-sm text-gray-500">
-              <span class="font-semibold text-gray-900">{{ books.length }}</span> books
+            <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              books
+              <span class="text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full">{{
+                books.length
+              }}</span>
             </p>
-            <div class="relative">
-              <svg
-                class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+            <div class="flex items-center gap-2">
+              <div class="relative">
+                <svg
+                  class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+                <input
+                  v-model="bookSearch"
+                  type="text"
+                  placeholder="Search by title or donor..."
+                  class="w-72 rounded-xl border border-gray-200 bg-white py-2.5 pl-10 pr-4 text-sm focus:border-primary focus:outline-none"
                 />
-              </svg>
-              <input
-                v-model="bookSearch"
-                type="text"
-                placeholder="Search by title or donor..."
-                class="w-72 rounded-xl border border-gray-200 bg-white py-2.5 pl-10 pr-4 text-sm focus:border-primary focus:outline-none"
+              </div>
+              <RefreshButton
+                :refreshing="refreshingTab === 'books'"
+                :loading="booksLoading"
+                label="Refresh books"
+                @refresh="refreshTab('books', booksLoading, loadBooks)"
               />
             </div>
           </div>
@@ -2505,7 +2596,7 @@ onMounted(async () => {
               </p>
             </div>
 
-            <div v-if="booksLoading" class="flex justify-center py-12">
+            <div v-if="booksLoading && refreshingTab !== 'books'" class="flex justify-center py-12">
               <RingSpinner :size="28" />
             </div>
             <div v-else-if="books.length === 0" class="text-center py-12 text-gray-400 text-sm">
@@ -2586,8 +2677,11 @@ onMounted(async () => {
         <!-- ════════════════════════════════════════════════════════════════ -->
         <template v-if="activeTab === 'departments'">
           <div class="flex items-center justify-between flex-wrap gap-3">
-            <p class="text-sm text-gray-500">
-              <span class="font-semibold text-gray-900">{{ majors.length }}</span> departments
+            <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              departments
+              <span class="text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full">{{
+                majors.length
+              }}</span>
             </p>
             <button
               type="button"
@@ -2735,39 +2829,66 @@ onMounted(async () => {
         <!-- DOCUMENTS TAB                                                    -->
         <!-- ════════════════════════════════════════════════════════════════ -->
         <template v-else-if="activeTab === 'documents'">
-          <div class="flex items-center justify-end flex-wrap gap-3">
-            <!-- Wider than before: it carries what the uploader dropdown used
-                 to, so the placeholder has to say so without truncating. -->
-            <SearchDashboard
-              v-model="docSearch"
-              placeholder="Search title or uploader..."
-              width="w-64"
-            />
-            <FilterDashboard
-              v-model="docMajorFilter"
-              :options="majorOptions"
-              all-label="All departments"
-            />
-            <!-- No all-label: every upload here is one or the other, and the
-                 two cannot usefully be shown together. -->
-            <FilterDashboard v-model="docStatusFilter" :options="DOC_STATUS_OPTIONS" />
-            <FilterDashboard
-              v-model="docTypeFilter"
-              :options="docTypeOptions"
-              all-label="All types"
-            />
-            <FilterDashboard v-model="docPeriodFilter" :options="PERIOD_OPTIONS" />
+          <div class="flex items-center justify-between flex-wrap gap-3">
+            <!-- Same count line the other tabs carry. docTotal, not the loaded
+                 array: this table is paginated, so the rows on screen are one
+                 page of the match — the number that means anything is how many
+                 the current filters match in total. -->
+            <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              documents
+              <span class="text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full">{{
+                docTotal
+              }}</span>
+            </p>
 
-            <button
-              v-if="docFiltersActive"
-              @click="clearDocFilters"
-              class="px-3 py-2 text-sm font-medium text-gray-500 rounded-xl hover:bg-gray-100 hover:cursor-pointer"
-            >
-              Clear
-            </button>
+            <!-- Wrapped, so justify-between pushes the controls to the far edge
+                 as one group instead of spreading them across the row. -->
+            <div class="flex flex-wrap items-center gap-3">
+              <!-- Wider than before: it carries what the uploader dropdown used
+                   to, so the placeholder has to say so without truncating. -->
+              <SearchDashboard
+                v-model="docSearch"
+                placeholder="Search title or uploader..."
+                width="w-64"
+              />
+              <FilterDashboard
+                v-model="docMajorFilter"
+                :options="majorOptions"
+                all-label="All departments"
+              />
+              <!-- No all-label: every upload here is one or the other, and the
+                   two cannot usefully be shown together. -->
+              <FilterDashboard v-model="docStatusFilter" :options="DOC_STATUS_OPTIONS" />
+              <FilterDashboard
+                v-model="docTypeFilter"
+                :options="docTypeOptions"
+                all-label="All types"
+              />
+              <FilterDashboard v-model="docPeriodFilter" :options="PERIOD_OPTIONS" />
+
+              <button
+                v-if="docFiltersActive"
+                @click="clearDocFilters"
+                class="px-3 py-2 text-sm font-medium text-gray-500 rounded-xl hover:bg-gray-100 hover:cursor-pointer"
+              >
+                Clear
+              </button>
+
+              <RefreshButton
+                :refreshing="refreshingTab === 'documents'"
+                :loading="docsLoading"
+                label="Refresh documents"
+                @refresh="refreshTab('documents', docsLoading, loadDocuments)"
+              />
+            </div>
           </div>
 
-          <div v-if="docsLoading" class="flex justify-center py-24"><LoadingSpinner /></div>
+          <div
+            v-if="docsLoading && refreshingTab !== 'documents'"
+            class="flex justify-center py-24"
+          >
+            <LoadingSpinner />
+          </div>
 
           <!-- Same shape as the Approvals table: overflow-auto plus a fixed
                column template and a min-width, so a narrow window scrolls

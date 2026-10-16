@@ -32,6 +32,8 @@ export interface AdminUser {
   role: string
   year_level: number | null
   created_at: string
+  /** Profile photo, null when the account has never set one. */
+  avatar_url: string | null
   majors: AdminMajorRef | null
   banned_at: string | null
   ban_reason: string | null
