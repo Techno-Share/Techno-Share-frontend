@@ -33,6 +33,7 @@
     "colFileSize": "File size",
     "viewerHint": "Scroll to zoom · drag to move · double-click to fit · R to rotate",
     "pdfLoading": "Loading document…",
+    "pdfPreparing": "Preparing pages…",
     "pdfFailed": "This PDF couldn't be displayed.",
     "fileDeleted": "File deleted",
     "uploadDeleted": "Last file removed — the document was deleted",
