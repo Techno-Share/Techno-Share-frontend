@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import { ref, shallowRef, watch, nextTick, onBeforeUnmount } from 'vue'
+import { computed, ref, shallowRef, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import * as pdfjs from 'pdfjs-dist'
-import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
+import type {
+  OnProgressParameters,
+  PDFDocumentLoadingTask,
+  PDFDocumentProxy,
+  RenderTask,
+} from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import { formatFileSize } from '@/utils/format'
 
 /**
  * PDF reader with a page-thumbnail rail, rendered with pdf.js rather than the
@@ -23,6 +29,48 @@ let loadingTask: PDFDocumentLoadingTask | null = null
 const pages = ref<{ num: number; width: number; height: number }[]>([])
 const loading = ref(true)
 const failed = ref(false)
+
+/**
+ * Download progress for the file itself.
+ *
+ * pdf.js reports bytes as they arrive, but it can only report a `total` when
+ * the response carries a Content-Length. A presigned MinIO GET does; a
+ * chunked or compressed one does not. So 0 here means "size unknown", not
+ * "nothing yet" — the bar runs indeterminate instead of sitting at 0%.
+ */
+const loadedBytes = ref(0)
+const totalBytes = ref(0)
+
+/**
+ * 'download' while bytes are arriving, 'prepare' once they all have and the
+ * page boxes are being measured. That second step has no byte count to report
+ * and is not free on a long file — up to 60 getPage() calls — so it gets its
+ * own indeterminate phase rather than leaving the bar frozen at 100%.
+ */
+const phase = ref<'download' | 'prepare'>('download')
+
+/** null when the total is unknown, which is what drives the indeterminate bar. */
+const percent = computed(() =>
+  totalBytes.value > 0
+    ? Math.min(100, Math.round((loadedBytes.value / totalBytes.value) * 100))
+    : null,
+)
+
+/** "1.2 MB / 8.4 MB", or just the loaded part when there is no total. */
+const progressLabel = computed(() => {
+  if (!loadedBytes.value) return ''
+  const done = formatFileSize(Math.round(loadedBytes.value / 1024))
+  if (!totalBytes.value) return done
+  return `${done} / ${formatFileSize(Math.round(totalBytes.value / 1024))}`
+})
+
+/** The line under the bar: a percentage when there is one, bytes either way. */
+const progressText = computed(() => {
+  if (phase.value === 'prepare') return ''
+  if (percent.value === null) return progressLabel.value
+  return progressLabel.value ? `${percent.value}% · ${progressLabel.value}` : `${percent.value}%`
+})
+
 const currentPage = ref(1)
 const scale = ref(1)
 
@@ -258,6 +306,9 @@ async function load(src: string) {
   teardown()
   loading.value = true
   failed.value = false
+  loadedBytes.value = 0
+  totalBytes.value = 0
+  phase.value = 'download'
   pages.value = []
   currentPage.value = 1
   scale.value = 1
@@ -265,6 +316,14 @@ async function load(src: string) {
 
   try {
     loadingTask = pdfjs.getDocument({ url: src })
+    // Gated on run like every other write here: a superseded load keeps
+    // streaming for a moment after teardown(), and its bytes must not drive
+    // the bar belonging to the load that replaced it.
+    loadingTask.onProgress = ({ loaded, total }: OnProgressParameters) => {
+      if (run !== runId) return
+      loadedBytes.value = loaded
+      totalBytes.value = total
+    }
     const pdf = await loadingTask.promise
     if (run !== runId) {
       // Resolved after a newer load took over: release the worker rather than
@@ -273,6 +332,7 @@ async function load(src: string) {
       return
     }
     doc.value = pdf
+    phase.value = 'prepare'
 
     // Page boxes are needed up front so the scrollbar is the right length
     // before anything is painted. Past 60 pages that costs more than it's
@@ -406,9 +466,41 @@ onBeforeUnmount(() => {
     <!-- Pages -->
     <div class="relative flex min-w-0 flex-1 flex-col">
       <div ref="scroller" class="flex-1 overflow-auto overscroll-contain p-2 sm:p-4">
-        <p v-if="loading" class="py-16 text-center text-sm text-white/60">
-          {{ t('document.documentDetailsPage.pdfLoading') }}
-        </p>
+        <!-- A bar, not a line of text: an office rendition can be tens of
+             megabytes over a phone connection, and "Loading…" on its own gives
+             no way to tell a slow download from a stalled one. -->
+        <div v-if="loading" class="flex flex-col items-center gap-3 py-16">
+          <p class="text-sm text-white/60">
+            {{
+              phase === 'prepare'
+                ? t('document.documentDetailsPage.pdfPreparing')
+                : t('document.documentDetailsPage.pdfLoading')
+            }}
+          </p>
+
+          <div
+            class="h-1.5 w-56 max-w-[70vw] overflow-hidden rounded-full bg-white/10"
+            role="progressbar"
+            :aria-label="t('document.documentDetailsPage.pdfLoading')"
+            :aria-valuemin="0"
+            :aria-valuemax="100"
+            :aria-valuenow="phase === 'download' ? (percent ?? undefined) : undefined"
+            :aria-valuetext="progressText || undefined"
+          >
+            <!-- Determinate only while a total is known AND bytes are still
+                 arriving. The prepare phase has no number to report, so it
+                 reuses the indeterminate sweep rather than freezing at 100%. -->
+            <div
+              v-if="percent !== null && phase === 'download'"
+              class="h-full rounded-full bg-primary transition-[width] duration-200 ease-out"
+              :style="{ width: `${percent}%` }"
+            />
+            <div v-else class="pdf-progress-sweep h-full w-1/3 rounded-full bg-primary" />
+          </div>
+
+          <!-- Fixed height so the bar does not jump when the text appears. -->
+          <p class="h-4 text-xs tabular-nums text-white/40">{{ progressText }}</p>
+        </div>
         <p v-else-if="failed" class="py-16 text-center text-sm text-white/60">
           {{ t('document.documentDetailsPage.pdfFailed') }}
         </p>
@@ -466,3 +558,29 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* The indeterminate sweep, for the two moments with no percentage to show: a
+   response that arrived without a Content-Length, and the page-measuring
+   phase. Transform-only, so it never triggers layout. */
+@keyframes pdf-progress-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.pdf-progress-sweep {
+  animation: pdf-progress-sweep 1.1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pdf-progress-sweep {
+    width: 100%;
+    opacity: 0.4;
+    animation: none;
+  }
+}
+</style>
