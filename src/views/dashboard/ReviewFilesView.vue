@@ -2,11 +2,11 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import api from '@/services/http'
-import * as documentsApi from '@/services/documents.api'
+import { useFilePreview } from '@/composables/useFilePreview'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
 import FileCard from '@/components/documents/FileCard.vue'
 import DocumentPreviewModal from '@/components/documents/DocumentPreviewModal.vue'
-import type { UploadFile, UploadStatus, PreviewableFile } from '@/types/documents.types'
+import type { UploadFile, UploadStatus } from '@/types/documents.types'
 
 /**
  * Every file of one pending submission, as cards.
@@ -62,19 +62,7 @@ const files = computed<UploadFile[]>(() =>
   })),
 )
 
-const previewOpen = ref(false)
-const previewTarget = ref<UploadFile | null>(null)
-
-function openPreview(file: UploadFile) {
-  previewTarget.value = file
-  previewOpen.value = true
-}
-
-async function downloadFile(file: PreviewableFile) {
-  // Private bucket — mint a fresh authorised link at click time.
-  const { url } = await documentsApi.fileAccessUrl(file.id, 'download')
-  window.open(url, '_blank', 'noopener')
-}
+const { previewOpen, previewTarget, openPreview, downloadFile } = useFilePreview()
 
 onMounted(async () => {
   try {

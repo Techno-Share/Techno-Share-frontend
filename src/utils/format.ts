@@ -1,3 +1,20 @@
+/**
+ * Display helpers shared across the app: dates and sizes, file-type styling,
+ * cohort labels, and the input patterns the API also enforces.
+ *
+ * Several values here are deliberately duplicated on the server — the
+ * validation patterns and the year-level rules exist in both so a form cannot
+ * accept something the API will reject. Each one names its counterpart; change
+ * them together.
+ */
+
+/**
+ * "just now", "5 min ago", "2 days ago", then a plain date past three days.
+ *
+ * The suffix check matters: `new Date()` reads an ISO string with no timezone
+ * as LOCAL time, so a UTC timestamp from the API would be read hours out.
+ * Appending `Z` when none is present forces it back to UTC.
+ */
 export function formatRelativeDate(iso: string | null | undefined): string {
   if (!iso) return '—'
   const normalized = iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z'
@@ -44,14 +61,32 @@ export function isImageFile(name: string | null | undefined): boolean {
  */
 export type FileTypeStyle = { label: string; solid: string; soft: string }
 
+/**
+ * Every `solid` here was `bg-white`, which rendered the white label on a white
+ * square — invisible in all eight places FileTypeIcon is used, since none of
+ * them passes a variant and `solid` is the default. The colours below are the
+ * ones this module's own comment always described.
+ *
+ * Shades are chosen for contrast against the white label rather than for
+ * brightness: the 600/700 range clears 4.5:1, which the 500s do not, and the
+ * label is rendered as small as 9 px inside a 32 px square.
+ */
 const FILE_TYPE_STYLES: Record<string, FileTypeStyle> = {
-  pdf: { label: 'PDF', solid: 'bg-white', soft: 'bg-white text-red-500' },
-  word: { label: 'DOC', solid: 'bg-white', soft: 'bg-white text-blue-500' },
-  slides: { label: 'PPT', solid: 'bg-white', soft: 'bg-white text-orange-500' },
-  image: { label: 'IMG', solid: 'bg-white', soft: 'bg-white text-green-600' },
-  archive: { label: 'ZIP', solid: 'bg-white', soft: 'bg-white text-yellow-600' },
-  sheet: { label: 'XLS', solid: 'bg-white', soft: 'bg-white text-teal-600' },
-  other: { label: 'FILE', solid: 'bg-white', soft: 'bg-white text-gray-500' },
+  pdf: { label: 'PDF', solid: 'bg-red-600', soft: 'bg-white text-red-500' },
+  word: { label: 'DOC', solid: 'bg-blue-600', soft: 'bg-white text-blue-500' },
+  slides: {
+    label: 'PPT',
+    solid: 'bg-orange-700',
+    soft: 'bg-white text-orange-500',
+  },
+  image: { label: 'IMG', solid: 'bg-green-700', soft: 'bg-white text-green-600' },
+  archive: {
+    label: 'ZIP',
+    solid: 'bg-amber-700',
+    soft: 'bg-white text-yellow-600',
+  },
+  sheet: { label: 'XLS', solid: 'bg-teal-700', soft: 'bg-white text-teal-600' },
+  other: { label: 'FILE', solid: 'bg-slate-600', soft: 'bg-white text-gray-500' },
 }
 
 const FILE_TYPE_BY_EXTENSION: Record<string, keyof typeof FILE_TYPE_STYLES> = {
@@ -73,6 +108,38 @@ const FILE_TYPE_BY_EXTENSION: Record<string, keyof typeof FILE_TYPE_STYLES> = {
   '7z': 'archive',
 }
 
+/**
+ * Can this file be shown in the viewer, or should clicking it just download?
+ *
+ * Previewability is a property of the FILE, not of its extension. A .docx
+ * previews only when the row carries a PDF rendition, and those exist only on
+ * documents uploaded before the LibreOffice conversion was removed from the
+ * API. Everything uploaded since has none, so a .docx and a .zip are now the
+ * same case: there is nothing to render, and opening a viewer to say so is a
+ * dialog between the user and their own click.
+ *
+ * Callers use this to decide between opening the preview and downloading
+ * directly. DocumentPreviewModal applies it again as a guard, so a caller that
+ * forgets still produces a download rather than an empty modal.
+ */
+export function isInlinePreviewable(
+  file: { original_name?: string | null; preview_url?: string | null } | null,
+): boolean {
+  if (!file) return false
+  const ext = fileExtension(file.original_name)
+
+  // Rendered natively by the browser, and inert: a PDF in its sandboxed
+  // viewer, and raster images. SVG is deliberately absent — it is active
+  // content, and it is not an accepted upload type either.
+  if (['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) return true
+
+  // Office formats ride on their rendition, or not at all.
+  if (['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx'].includes(ext)) return !!file.preview_url
+
+  // Archives and anything unrecognised: download only.
+  return false
+}
+
 /** Colours and short label for a file, by its extension. */
 export function fileTypeStyle(name: string | null | undefined): FileTypeStyle {
   const family = FILE_TYPE_BY_EXTENSION[fileExtension(name)] ?? 'other'
@@ -85,6 +152,12 @@ export function getFileIcon(name: string | null | undefined): { bg: string; labe
   return { bg: style.solid, label: style.label }
 }
 
+/**
+ * A t.me link from either an `@handle` or a URL the user pasted.
+ *
+ * Returns null when it is neither, so callers render plain text instead of a
+ * link that would go nowhere.
+ */
 export function telegramHref(contact: string): string | null {
   const trimmed = contact.trim()
   if (trimmed.startsWith('@')) return `https://t.me/${trimmed.slice(1)}`
@@ -129,6 +202,25 @@ export function truncateText(text: string, maxChars = 120): string {
 // Neither character means anything to a template or a query — the characters
 // that do are refused separately by FORBIDDEN_TEXT_PATTERN.
 export const TEXT_NAME_PATTERN = /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s_-]+$/u
+
+// The same rule WITHOUT the underscore, for names chosen rather than typed from
+// a file: subjects and departments. "Applied Mathematics" is written out, never
+// pasted from `applied_mathematics`, so the underscore that TEXT_NAME_PATTERN
+// allows would only ever arrive by mistake here.
+//
+// Declared separately on purpose. It was three identical copies in
+// EditSubjectModal, CreateMajorModal and SubjectCreateModal; merging it into
+// TEXT_NAME_PATTERN instead would have silently started accepting underscores
+// in department names, which is a different rule wearing the same shape.
+/**
+ * A Telegram account: `@name`, a bare name, or a t.me link.
+ *
+ * Must stay equal to the @Matches rule on `telegram` in the backend's
+ * users/dto/update-user.dto.ts, so the form refuses what the API would.
+ */
+export const TELEGRAM_PATTERN = /^@?[A-Za-z0-9_]{4,32}$|^(https?:\/\/)?t\.me\/[A-Za-z0-9_]{4,32}$/
+
+export const ACADEMIC_NAME_PATTERN = /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s-]+$/u
 
 // Strip disallowed characters (e.g. from an auto-filled file name) so the value
 // passes TEXT_NAME_PATTERN without surprising the user with an instant error.

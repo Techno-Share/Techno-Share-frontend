@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useDocumentsStore } from '@/stores/documents.store'
 import { useAuthStore } from '@/stores/auth.store'
@@ -65,7 +66,8 @@ const yearLevel = computed(() => auth.user?.year_level)
 // This feed IS the department/year filter, so without those there is nothing to
 // fetch — load() bails out. Say so and offer the form, rather than showing the
 // ordinary "no documents yet" state, which would read as an empty library.
-const { needsProfile, open: openProfilePrompt } = useCompleteProfile()
+const router = useRouter()
+const { needsProfile } = useCompleteProfile()
 
 function load() {
   if (!majorId.value || !yearLevel.value) return
@@ -162,7 +164,7 @@ watch(searchQuery, () => {
         v-else-if="needsProfile"
         :message="t('document.documentsPage.needProfile')"
         :action-label="t('document.documentsPage.setProfile')"
-        @action="openProfilePrompt"
+        @action="router.push({ name: 'welcome' })"
       >
         <template #icon>
           <svg

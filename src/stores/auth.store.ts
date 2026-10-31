@@ -26,6 +26,15 @@ interface User {
   is_moderator?: boolean
   /** Server-computed: a Foundation year 2 student is due their July rollover. */
   needs_department_choice?: boolean
+  /**
+   * Server-computed: the year THIS request just moved the student up to.
+   *
+   * Non-null on exactly one response — the one that applied the rollover and
+   * actually changed the year. Null afterwards, and null for the capped cases
+   * (year 5, Foundation year 2), so a notice shown on it cannot repeat and
+   * cannot announce a promotion that did not happen.
+   */
+  promoted_to_year?: number | null
   majors: { id: string; name: string; acronym: string }
 }
 

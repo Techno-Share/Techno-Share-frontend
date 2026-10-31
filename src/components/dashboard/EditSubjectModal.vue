@@ -2,10 +2,15 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import ConfirmChangesModal, { type FieldChange } from '@/components/base/ConfirmChangesModal.vue'
 import RingSpinner from '@/components/base/RingSpinner.vue'
+import { ACADEMIC_NAME_PATTERN } from '@/utils/format'
 
 /**
- * Edits a subject's name, acronym and semester. Validation mirrors the API's
- * rules so the error arrives before the request does.
+ * Edits a subject's name, acronym and semester.
+ *
+ * Validation mirrors the API so the error arrives before the request does.
+ * The acronym rule below must stay equal to `SUBJECT_ACRONYM_PATTERN` in
+ * backend/src/modules/subjects/dto/create-subject.dto.ts — it allows Khmer,
+ * which the major rule deliberately does not.
  */
 const props = defineProps<{
   subject: {
@@ -35,7 +40,6 @@ const emit = defineEmits<{
 }>()
 
 // Name: letters/numbers/spaces/hyphens in any language. Acronym: no lowercase.
-const NAME_PATTERN = /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s-]+$/u
 const ACRONYM_PATTERN = /^(?!.*\p{Ll})[\p{L}\p{M}\p{N}]+$/u
 
 const name = ref(props.subject.name)
@@ -88,7 +92,7 @@ function validate(): boolean {
     ? 'Please enter subject name'
     : trimmedName.length > 100
       ? 'You can only enter up to 100 characters'
-      : !NAME_PATTERN.test(trimmedName)
+      : !ACADEMIC_NAME_PATTERN.test(trimmedName)
         ? 'Subject name must not contain special characters'
         : ''
 

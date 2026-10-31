@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import RingSpinner from '@/components/base/RingSpinner.vue'
 import ConfirmChangesModal, { type FieldChange } from '@/components/base/ConfirmChangesModal.vue'
 import { clearDraft, readDraft, writeDraft } from '@/composables/uploadDraft'
+import { ACADEMIC_NAME_PATTERN } from '@/utils/format'
 
 /**
  * Creates a department, or edits one when `major` is passed. Sent as multipart
@@ -20,8 +21,10 @@ const { t } = useI18n({ useScope: 'global' })
 
 const isEditing = computed(() => !!props.major)
 
-// Mirrors the API's rules so the error arrives before the request does.
-const NAME_PATTERN = /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s-]+$/u
+// Must stay equal to MAJOR_ACRONYM_PATTERN in the backend's
+// majors/dto/create-major.dto.ts, so the error arrives before the request.
+// ASCII-only on purpose, unlike the subject rule: the department page resolves
+// its route slug by lowercasing this acronym.
 const ACRONYM_PATTERN = /^[A-Z0-9]+$/
 
 const name = ref(props.major?.name ?? '')
@@ -62,7 +65,7 @@ function validate() {
     ? 'Department name is required'
     : trimmedName.length > 100
       ? 'Name must be 100 characters or fewer'
-      : !NAME_PATTERN.test(trimmedName)
+      : !ACADEMIC_NAME_PATTERN.test(trimmedName)
         ? 'Name must not contain special characters'
         : ''
 

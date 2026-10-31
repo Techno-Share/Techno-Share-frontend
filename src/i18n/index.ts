@@ -11,11 +11,15 @@ import kmDocument from './locales/km/document.json'
 import enNotification from './locales/en/notification.json'
 import kmNotification from './locales/km/notification.json'
 
-// ✅ get saved language from browser
+/**
+ * The language the reader last chose, written by the toggle in NavBar.
+ *
+ * Validated rather than trusted: a stale or hand-edited value would leave
+ * vue-i18n pointing at a locale that has no messages, and every string on
+ * the page would quietly come through fallbackLocale instead.
+ */
 const savedLang = localStorage.getItem('lang')
-
-// ✅ use saved language OR fallback to 'en'
-const locale = savedLang ? savedLang : 'en'
+const locale = savedLang === 'km' || savedLang === 'en' ? savedLang : 'en'
 
 const messages = {
   en: {
