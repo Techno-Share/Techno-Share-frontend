@@ -4,7 +4,6 @@
   "bookDeclined": "Your request for \"{title}\" was declined.",
   "bookGivenToAnother": "\"{title}\" is no longer available. It was given to another student.",
   "bookHandoverCancelled": "The handover for \"{title}\" was cancelled. The book is available again.",
-  "bookReservationExpired": "The reservation for \"{title}\" has expired. The book is available again.",
   "bookReceived": "Your book \"{title}\" has been received. Thank you for giving it a new life!",
   "documentApproved": "Your document \"{title}\" has been approved.",
   "documentsApproved": "Your {count} documents have been approved.",
