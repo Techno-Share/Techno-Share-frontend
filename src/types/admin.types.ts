@@ -11,8 +11,6 @@
  */
 
 /** A department, as every admin payload embeds it. */
-import type { Paginated } from './api.types'
-
 export interface AdminMajorRef {
   id: string
   acronym: string
