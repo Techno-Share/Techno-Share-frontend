@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BookGridCard from '@/components/books/BookGridCard.vue'
+import EditContactModal from '@/components/books/EditContactModal.vue'
+import { useAuthStore } from '@/stores/auth.store'
 import { displayName } from '@/utils/format'
 import type { MyBook } from '@/types/books.types'
 
@@ -18,10 +20,23 @@ const emit = defineEmits<{ (e: 'cancel'): void }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
+const auth = useAuthStore()
+
 const receiver = computed(() => {
   const r = props.book.request?.requester
   return r ? displayName(r.first_name, r.last_name) : ''
 })
+
+/**
+ * The account the receiver has been given.
+ *
+ * Read from the profile rather than from the request: the API hands out
+ * `users.telegram` at read time, so this is the handle they will actually see,
+ * and a change here reaches them without the reservation being touched.
+ */
+const contact = computed(() => auth.user?.telegram ?? '')
+
+const editingContact = ref(false)
 </script>
 
 <template>
@@ -59,8 +74,24 @@ const receiver = computed(() => {
       {{ t('dashboard.books.awaitingReceiver', { name: receiver }) }}
     </p>
 
-    <!-- The donor can release the book too, if the receiver goes quiet and they
-         would rather not wait for the 3-day sweep. -->
+    <!-- Which account they were given, and a way to correct it. The sentence
+         above raises the question; answering it anywhere else would mean
+         leaving this screen to find out. -->
+    <div class="flex items-center gap-2 rounded-lg bg-gray-50 px-2.5 py-1.5">
+      <span class="min-w-0 flex-1 truncate text-xs font-medium text-gray-700">
+        {{ contact || t('dashboard.books.noContactSet') }}
+      </span>
+      <button
+        type="button"
+        class="shrink-0 text-xs font-semibold text-primary transition hover:cursor-pointer hover:underline"
+        @click="editingContact = true"
+      >
+        {{ t('dashboard.books.editContact') }}
+      </button>
+    </div>
+
+    <!-- Either party can call the handover off: there is no automatic expiry,
+         so a reservation ends only when the donor or the receiver ends it. -->
     <button
       type="button"
       :disabled="props.busy"
@@ -69,5 +100,7 @@ const receiver = computed(() => {
     >
       {{ t('dashboard.books.cancelHandover') }}
     </button>
+
+    <EditContactModal v-if="editingContact" @close="editingContact = false" />
   </BookGridCard>
 </template>

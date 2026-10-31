@@ -3,11 +3,13 @@ import { ref, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useAnchoredPanel } from '@/composables/useAnchoredPanel'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth.store'
+import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/utils/api-error'
 import {
   audienceLabel as sharedAudienceLabel,
   formatExpiry,
+  formatRelativeDate,
   isExpired,
   reqInitials,
   yearLevelsForMajor,
@@ -24,8 +26,12 @@ import type { UploadFile } from '@/types/documents.types'
 import FolderIcon from '@/components/base/FolderIcon.vue'
 import RowActionsMenu from '@/components/base/RowActionsMenu.vue'
 import UserAvatar from '@/components/base/UserAvatar.vue'
-import type { PreviewableFile } from '@/types/documents.types'
-import type { AdminDocument, AdminPendingDocument, AdminUser } from '@/types/admin.types'
+import type {
+  AdminDocument,
+  AdminPendingDocument,
+  AdminPromotionRollover,
+  AdminUser,
+} from '@/types/admin.types'
 import type { Paginated } from '@/types/api.types'
 import Pagination from '@/components/base/Pagination.vue'
 import PageSizeSelect from '@/components/base/PageSizeSelect.vue'
@@ -38,7 +44,6 @@ import StatusDonutChart from '@/components/dashboard/StatusDonutChart.vue'
 import CreateMajorModal from '@/components/dashboard/CreateMajorModal.vue'
 import EditSubjectModal from '@/components/dashboard/EditSubjectModal.vue'
 import api from '@/services/http'
-import * as documentsApi from '@/services/documents.api'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
 import PromotionScheduleModal from '@/components/dashboard/PromotionScheduleModal.vue'
 import DocumentReviewTable from '@/components/review/DocumentReviewTable.vue'
@@ -55,7 +60,15 @@ async function handleLogout() {
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
-type Tab = 'overview' | 'approvals' | 'departments' | 'subjects' | 'users' | 'books' | 'documents'
+type Tab =
+  | 'overview'
+  | 'approvals'
+  | 'departments'
+  | 'subjects'
+  | 'users'
+  | 'books'
+  | 'documents'
+  | 'promotions'
 const TABS: Tab[] = [
   'overview',
   'approvals',
@@ -64,6 +77,7 @@ const TABS: Tab[] = [
   'users',
   'books',
   'documents',
+  'promotions',
 ]
 
 /**
@@ -179,6 +193,52 @@ watch(userSearch, () => {
 function resetUserPage() {
   if (userPage.value === 1) void loadUsers()
   else userPage.value = 1 // the watcher above refetches
+}
+
+// ── Promotions ──────────────────────────────────────────────────────────────
+//
+// The record of who moved up a year and when. One row per promotion, not per
+// student, so someone who has moved up twice appears twice.
+//
+// Legitimately empty until the first rollover after the promotion_events
+// migration — promotions before it were never recorded, and the migration
+// explains why they are not reconstructed.
+
+const promotions = ref<AdminPromotionRollover[]>([])
+const promotionsLoading = ref(false)
+const promotionsLoaded = ref(false)
+const promotionTotal = ref(0)
+const promotionPage = ref(1)
+const promotionPageSize = ref(10)
+
+const promotionRequests = latestRequestGuard()
+
+async function loadPromotions() {
+  const ticket = promotionRequests.claim()
+  promotionsLoading.value = true
+  try {
+    const { data } = await api.get<Paginated<AdminPromotionRollover>>('/admin/promotion-events', {
+      params: { page: promotionPage.value, limit: promotionPageSize.value },
+    })
+    // Same stale-response guard as the other tables that refetch as you type.
+    if (!promotionRequests.isCurrent(ticket)) return
+    promotions.value = data.items
+    promotionTotal.value = data.total
+    promotionsLoaded.value = true
+  } catch {
+    showToast('Failed to load promotions', { type: 'error' })
+  } finally {
+    if (promotionRequests.isCurrent(ticket)) promotionsLoading.value = false
+  }
+}
+
+watch(promotionPage, loadPromotions)
+watch(promotionPageSize, resetPromotionPage)
+
+/** See resetUserPage — assigning 1 when already 1 fires no watcher. */
+function resetPromotionPage() {
+  if (promotionPage.value === 1) void loadPromotions()
+  else promotionPage.value = 1
 }
 
 // ── User administration ─────────────────────────────────────────────────────
@@ -599,6 +659,64 @@ function onUserAction(
   else if (key === 'unban') unbanUser(user)
 }
 
+/**
+ * When a promotion took effect, split into day and time.
+ *
+ * Two rollovers can be scheduled inside one academic year — that is why the
+ * schedule is stored as an instant rather than a year — so the day alone
+ * cannot always tell two of them apart. The time is what distinguishes them.
+ *
+ * Returned as a pair rather than one string so the cell can set the time on
+ * its own line: this column is two of twelve, and a single line wraps.
+ */
+function promotionDateTime(iso: string) {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return { day: '—', time: '' }
+  return {
+    day: at.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }),
+    time: at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+  }
+}
+
+/**
+ * How long after their last request an account still counts as online.
+ *
+ * Comfortably above the one-minute throttle on the write itself: with a
+ * tighter window, someone actively using the site would flicker offline
+ * between the moments their timestamp is refreshed.
+ */
+const ONLINE_WITHIN_MS = 5 * 60 * 1000
+
+function isOnline(lastSeenAt: string | null) {
+  if (!lastSeenAt) return false
+  const at = new Date(lastSeenAt).getTime()
+  if (Number.isNaN(at)) return false
+  return Date.now() - at < ONLINE_WITHIN_MS
+}
+
+/**
+ * "Online", or when they were last here.
+ *
+ * Null reads "Never seen", not "Never signed in" — the column was added part
+ * way through the app's life and cannot distinguish a dormant account from one
+ * that simply predates it.
+ */
+function lastSeenLabel(lastSeenAt: string | null) {
+  if (!lastSeenAt) return 'Never seen'
+  return isOnline(lastSeenAt) ? 'Online' : formatRelativeDate(lastSeenAt)
+}
+
+/**
+ * How much of a rollover has reached its students, 0-100.
+ *
+ * Guarded against a zero denominator: a rollover scheduled before any account
+ * existed has nobody to promote, and 0/0 would render a NaN-wide bar.
+ */
+function rolloutPercent(p: { promoted_users: number; eligible_users: number }) {
+  if (!p.eligible_users) return 0
+  return Math.round((p.promoted_users / p.eligible_users) * 100)
+}
+
 function moderates(user: { moderates?: { id: string }[] }, majorId: string) {
   return (user.moderates ?? []).some((m) => m.id === majorId)
 }
@@ -864,23 +982,7 @@ function toggleGroup(groupId: string) {
   else expandedGroups.value.add(groupId)
 }
 
-const previewOpen = ref(false)
-const previewTarget = ref<PreviewableFile | null>(null)
-
-function openPreview(file: PreviewableFile) {
-  previewTarget.value = file
-  previewOpen.value = true
-}
-
-async function downloadFile(file: PreviewableFile) {
-  // The bucket is private: ask the API for a fresh authorised link rather than
-  // using the one embedded in the list, which expires within minutes.
-  const { url } = await documentsApi.fileAccessUrl(file.id, 'download')
-  const link = document.createElement('a')
-  link.href = url
-  link.download = file.original_name ?? ''
-  link.click()
-}
+const { previewOpen, previewTarget, openPreview, downloadFile } = useFilePreview()
 
 function onDocAction(key: string, groupId: string) {
   if (key === 'approve') approveDoc(groupId)
@@ -1324,6 +1426,7 @@ watch(activeTab, (tab) => {
   if (tab === 'overview' && !overviewLoaded.value) loadOverview()
   if (tab === 'approvals' && pendingDocs.value.length === 0) loadApprovals()
   if (tab === 'users' && !usersLoaded.value) void loadUsers()
+  if (tab === 'promotions' && !promotionsLoaded.value) void loadPromotions()
   if (tab === 'books' && books.value.length === 0) void loadBooks()
   if (tab === 'departments') void loadDepartments()
   if (tab === 'subjects' && !subjectsLoaded.value) void loadAllSubjects()
@@ -1467,7 +1570,15 @@ const promotionState = computed(() => {
         tile: 'bg-green-50',
         icon: 'text-green-500',
         detail: `Everyone moved up a year on ${when}.`,
-        action: 'Change date',
+        /**
+         * Not "Change date". This rollover has already run, and setting a new
+         * instant does not amend it — isRolloverDue compares each student's
+         * stamp against the schedule, so a later date makes every one of them
+         * due again and advances the whole institute a second time. "Change
+         * date" invites an admin to correct what looks like a typo and quietly
+         * promotes everybody.
+         */
+        action: 'Schedule next',
       }
     : {
         label: 'Scheduled',
@@ -1579,6 +1690,7 @@ onMounted(async () => {
             { tab: 'users', label: 'Users', icon: 'users' },
             { tab: 'books', label: 'Books', icon: 'book' },
             { tab: 'documents', label: 'Documents', icon: 'document' },
+            { tab: 'promotions', label: 'Promotions', icon: 'promotion' },
           ].filter((item) => allowedTabs.includes(item.tab as Tab)) as {
             tab: Tab
             label: string
@@ -1680,6 +1792,22 @@ onMounted(async () => {
               <path
                 d="M128 128C128 92.7 156.7 64 192 64L341.5 64C358.5 64 374.8 70.7 386.8 82.7L493.3 189.3C505.3 201.3 512 217.6 512 234.6L512 512C512 547.3 483.3 576 448 576L192 576C156.7 576 128 547.3 128 512L128 128zM336 122.5L336 216C336 229.3 346.7 240 360 240L453.5 240L336 122.5zM248 320C234.7 320 224 330.7 224 344C224 357.3 234.7 368 248 368L392 368C405.3 368 416 357.3 416 344C416 330.7 405.3 320 392 320L248 320zM248 416C234.7 416 224 426.7 224 440C224 453.3 234.7 464 248 464L392 464C405.3 464 416 453.3 416 440C416 426.7 405.3 416 392 416L248 416z"
               />
+            </svg>
+
+            <!-- Promotions: an upward step, for moving up a year. Stroked
+                 rather than filled, like the other outline icons here. -->
+            <svg
+              v-else-if="item.icon === 'promotion'"
+              class="h-4 w-4 shrink-0"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              viewBox="0 0 24 24"
+            >
+              <path d="M3 17l6-6 4 4 7-7" />
+              <path d="M14 7h7v7" />
             </svg>
 
             <span class="flex-1">{{ item.label }}</span>
@@ -1928,74 +2056,6 @@ onMounted(async () => {
                     />
                   </svg>
                 </div>
-              </div>
-            </div>
-
-            <!-- Promotion schedule. The one thing on this page that changes
-                 data rather than reporting it — and it changes every student's
-                 year at once, so it keeps a card of its own.
-
-                 One line of prose, not a paragraph: the state is a badge and
-                 the date is the sentence. The caveat about students advancing
-                 lazily lives in the dialog, where it is read at the moment it
-                 matters rather than on every visit to the dashboard. -->
-            <div class="bg-white rounded-2xl border border-gray-100 px-5 py-5">
-              <div class="flex flex-wrap items-center justify-between gap-4">
-                <!-- items-start, not items-center: once the sentence wraps to a
-                     third line on a narrow screen, a vertically-centred tile
-                     drifts away from the heading it belongs to. -->
-                <div class="flex min-w-0 items-start gap-4">
-                  <!-- The same icon tile the statistics use, so this reads as
-                       part of the dashboard rather than a banner beside it. -->
-                  <div
-                    class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl"
-                    :class="promotionState.tile"
-                  >
-                    <svg
-                      class="h-6 w-6"
-                      :class="promotionState.icon"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    >
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        d="M4.26 10.147a60.438 60.438 0 0 0-.491 6.347A48.62 48.62 0 0 1 12 20.904a48.62 48.62 0 0 1 8.232-4.41 60.46 60.46 0 0 0-.491-6.347m-15.482 0a50.636 50.636 0 0 0-2.658-.813A59.906 59.906 0 0 1 12 3.493a59.903 59.903 0 0 1 10.399 5.84c-.896.248-1.783.52-2.658.814m-15.482 0A50.717 50.717 0 0 1 12 13.489a50.702 50.702 0 0 1 7.74-3.342M6.75 15a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm0 0v-3.675A55.378 55.378 0 0 1 12 8.443m-7.007 11.55A5.981 5.981 0 0 0 6.75 15.75v-1.5"
-                      />
-                    </svg>
-                  </div>
-
-                  <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <h3 class="text-base font-semibold text-gray-900">Student promotion</h3>
-                      <span
-                        class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                        :class="promotionState.badge"
-                      >
-                        {{ promotionState.label }}
-                      </span>
-                      <!-- Counts down only while it is still ahead; afterwards
-                           the badge already says it is in effect. -->
-                      <span
-                        v-if="promotionCountdown"
-                        class="rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-primary"
-                      >
-                        in {{ promotionCountdown }}
-                      </span>
-                    </div>
-                    <p class="mt-1 text-sm text-gray-500">{{ promotionState.detail }}</p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  class="shrink-0 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white transition hover:cursor-pointer hover:bg-primary-hover"
-                  @click="promotionModalOpen = true"
-                >
-                  {{ promotionState.action }}
-                </button>
               </div>
             </div>
 
@@ -2357,11 +2417,11 @@ onMounted(async () => {
             <div
               class="sticky top-0 z-20 grid grid-cols-12 gap-4 border-b border-gray-100 bg-primary px-6 py-3"
             >
-              <p class="col-span-4 text-xs font-semibold text-white uppercase tracking-wide">
+              <p class="col-span-3 text-xs font-semibold text-white uppercase tracking-wide">
                 Name
               </p>
               <p
-                class="col-span-3 text-center text-xs font-semibold tracking-wide text-white uppercase"
+                class="col-span-2 text-center text-xs font-semibold tracking-wide text-white uppercase"
               >
                 Email
               </p>
@@ -2369,6 +2429,11 @@ onMounted(async () => {
                 class="col-span-1 text-center text-xs font-semibold tracking-wide text-white uppercase"
               >
                 Major
+              </p>
+              <p
+                class="col-span-2 text-center text-xs font-semibold tracking-wide text-white uppercase"
+              >
+                Last seen
               </p>
               <p
                 class="col-span-2 text-center text-xs font-semibold tracking-wide text-white uppercase"
@@ -2399,7 +2464,7 @@ onMounted(async () => {
                 i !== users.length - 1 ? 'border-b border-gray-100' : '',
               ]"
             >
-              <div class="col-span-4 flex items-center gap-3 min-w-0">
+              <div class="col-span-3 flex items-center gap-3 min-w-0">
                 <!-- UserAvatar rather than a bare <img v-if>: it keeps the
                      initials as the fallback when the photo fails as well as
                      when there is none, and sends no Referer — Google profile
@@ -2420,13 +2485,41 @@ onMounted(async () => {
                   >
                 </p>
               </div>
-              <p class="col-span-3 truncate text-center text-sm text-gray-500">{{ user.email }}</p>
+              <p class="col-span-2 truncate text-center text-sm text-gray-500">{{ user.email }}</p>
               <p class="col-span-1 text-center text-xs text-gray-500">
                 {{ user.majors?.acronym ?? '—'
                 }}<span v-if="user.year_level" class="text-gray-400">
                   · Y{{ user.year_level }}</span
                 >
               </p>
+
+              <!-- Activity. A filled dot for someone active right now, a hollow
+                   one otherwise, so the state survives being printed or read
+                   without colour. The exact timestamp is on hover. -->
+              <div
+                class="col-span-2 flex items-center justify-center gap-1.5"
+                :title="
+                  user.last_seen_at ? new Date(user.last_seen_at).toLocaleString() : undefined
+                "
+              >
+                <span
+                  :class="[
+                    'h-2 w-2 shrink-0 rounded-full',
+                    isOnline(user.last_seen_at)
+                      ? 'bg-green-500'
+                      : 'border border-gray-300 bg-transparent',
+                  ]"
+                  aria-hidden="true"
+                />
+                <span
+                  :class="[
+                    'text-xs',
+                    isOnline(user.last_seen_at) ? 'font-semibold text-green-600' : 'text-gray-500',
+                  ]"
+                >
+                  {{ lastSeenLabel(user.last_seen_at) }}
+                </span>
+              </div>
 
               <!-- Departments this person reviews. Admins review everything, so
                    an assignment would add nothing. -->
@@ -3093,6 +3186,183 @@ onMounted(async () => {
               class="col-start-3 justify-self-end"
               v-model="docPageSize"
               :total="docTotal"
+              :options="PAGE_SIZE_OPTIONS"
+              direction="up"
+            />
+          </div>
+        </template>
+
+        <!-- ════════════════════════════════════════════════════════════════ -->
+        <!-- PROMOTIONS TAB                                                   -->
+        <!-- ════════════════════════════════════════════════════════════════ -->
+        <template v-else-if="activeTab === 'promotions'">
+          <!-- The schedule on the left, what it has done on the right.
+               One row on a wide screen, stacked below lg where two half-width
+               columns would squeeze the table's own two columns into nothing.
+
+               min-w-0 on both halves: a flex item defaults to min-width:auto,
+               so the table's content would refuse to shrink and push the card
+               off the row instead of scrolling inside its own half. -->
+          <div class="flex min-h-0 flex-1 flex-col gap-6 lg:flex-row">
+            <!-- The schedule, on the left — the control comes before what it
+                 produced. self-start so it keeps its own height instead of
+                 stretching to match the table beside it; a short card pulled
+                 to full height is mostly white space. -->
+            <div
+              class="flex min-w-0 flex-1 flex-col rounded-2xl border border-gray-100 bg-white px-5 py-5"
+            >
+              <!-- The countdown sits on the card's midline.
+                   Two flex-1 groups either side of it: the space left after the
+                   countdown and the gaps is split equally between them, which
+                   puts the middle child's centre at exactly half the card's
+                   height. Centring the whole stack instead would only land it
+                   near the middle, and would drift as the sentence above wraps
+                   to another line. -->
+              <div class="flex flex-1 flex-col items-center gap-4 text-center">
+                <div class="flex flex-1 flex-col items-center justify-center gap-4">
+                  <div
+                    class="flex h-22 w-22 shrink-0 items-center justify-center rounded-2xl"
+                    :class="promotionState.tile"
+                  >
+                    <svg
+                      class="h-12 w-12"
+                      :class="promotionState.icon"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M4.26 10.147a60.438 60.438 0 0 0-.491 6.347A48.62 48.62 0 0 1 12 20.904a48.62 48.62 0 0 1 8.232-4.41 60.46 60.46 0 0 0-.491-6.347m-15.482 0a50.636 50.636 0 0 0-2.658-.813A59.906 59.906 0 0 1 12 3.493a59.903 59.903 0 0 1 10.399 5.84c-.896.248-1.783.52-2.658.814m-15.482 0A50.717 50.717 0 0 1 12 13.489a50.702 50.702 0 0 1 7.74-3.342M6.75 15a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm0 0v-3.675A55.378 55.378 0 0 1 12 8.443m-7.007 11.55A5.981 5.981 0 0 0 6.75 15.75v-1.5"
+                      />
+                    </svg>
+                  </div>
+
+                  <div class="min-w-0">
+                    <h3 class="text-2xl font-semibold text-gray-900">Student promotion</h3>
+                    <!-- inline-block so the badge keeps its pill shape while the
+                         parent's text-center positions it. -->
+                    <span
+                      class="mt-3 inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                      :class="promotionState.badge"
+                    >
+                      {{ promotionState.label }}
+                    </span>
+                    <p class="mt-6 text-sm text-gray-500">{{ promotionState.detail }}</p>
+                  </div>
+                </div>
+
+                <!-- Only while the date is still ahead; once it passes the badge
+                     already says it is in effect. -->
+                <span
+                  v-if="promotionCountdown"
+                  class="mt-15 rounded-full bg-primary/10 px-2 py-0.5 font-mono text-5xl font-semibold tabular-nums text-primary"
+                >
+                  {{ promotionCountdown }}
+                </span>
+
+                <div class="flex flex-1 flex-col items-center justify-center">
+                  <button
+                    type="button"
+                    class="shrink-0 rounded-xl bg-primary px-4 py-2 text-xl font-semibold text-white transition hover:cursor-pointer hover:bg-primary-hover"
+                    @click="promotionModalOpen = true"
+                  >
+                    {{ promotionState.action }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- What that schedule has done, on the right: the scrolling half. -->
+            <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+              <div v-if="promotionsLoading" class="flex flex-1 items-center justify-center">
+                <LoadingSpinner />
+              </div>
+
+              <div
+                v-else
+                class="min-h-0 flex-1 overflow-y-auto overscroll-none rounded-2xl border border-gray-100 bg-white"
+              >
+                <div
+                  class="sticky top-0 z-20 grid grid-cols-12 gap-4 border-b border-gray-100 bg-primary px-6 py-3"
+                >
+                  <p class="col-span-6 text-xs font-semibold uppercase tracking-wide text-white">
+                    Date set
+                  </p>
+                  <p
+                    class="col-span-6 text-right text-xs font-semibold uppercase tracking-wide text-white"
+                  >
+                    Students promoted
+                  </p>
+                </div>
+
+                <!-- Empty until an admin schedules one. Not an error state. -->
+                <div v-if="promotions.length === 0" class="px-6 py-12 text-center">
+                  <p class="text-sm text-gray-400">No promotions yet.</p>
+                  <p class="mt-1 text-xs text-gray-400">
+                    A promotion appears here once the date set above has passed.
+                  </p>
+                </div>
+
+                <div
+                  v-for="(p, i) in promotions"
+                  :key="p.rollover_at"
+                  :class="[
+                    'grid grid-cols-12 items-center gap-4 px-6 py-4 transition-colors hover:bg-gray-50',
+                    i !== promotions.length - 1 ? 'border-b border-gray-100' : '',
+                  ]"
+                >
+                  <!-- The instant the admin set, not when a student collected it. -->
+                  <time :datetime="p.rollover_at" class="col-span-6">
+                    <span class="block text-sm font-medium text-gray-900">
+                      {{ promotionDateTime(p.rollover_at).day }}
+                    </span>
+                    <span class="block text-xs text-gray-400">
+                      {{ promotionDateTime(p.rollover_at).time }}
+                    </span>
+                  </time>
+
+                  <!-- How far it has reached. The bar is the point: a promotion
+                       is applied on each student's next visit, so this fills in
+                       over the days after the date rather than all at once. -->
+                  <div class="col-span-6 flex flex-col items-end gap-1.5">
+                    <p class="text-sm font-semibold text-gray-900">
+                      {{ p.promoted_users }}
+                      <span class="font-normal text-gray-400">of {{ p.eligible_users }}</span>
+                    </p>
+                    <div
+                      class="h-1.5 w-32 overflow-hidden rounded-full bg-gray-100"
+                      role="progressbar"
+                      :aria-valuenow="rolloutPercent(p)"
+                      aria-valuemin="0"
+                      aria-valuemax="100"
+                      :aria-label="`${p.promoted_users} of ${p.eligible_users} students promoted`"
+                    >
+                      <div
+                        class="h-full rounded-full transition-all"
+                        :class="rolloutPercent(p) === 100 ? 'bg-green-500' : 'bg-primary'"
+                        :style="{ width: `${rolloutPercent(p)}%` }"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="!promotionsLoading" class="grid grid-cols-3 items-center gap-3">
+            <Pagination
+              class="col-start-2 justify-self-center"
+              v-model:page="promotionPage"
+              :total="promotionTotal"
+              :page-size="promotionPageSize"
+            />
+            <PageSizeSelect
+              class="col-start-3 justify-self-end"
+              v-model="promotionPageSize"
+              :total="promotionTotal"
               :options="PAGE_SIZE_OPTIONS"
               direction="up"
             />

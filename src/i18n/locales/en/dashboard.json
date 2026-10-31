@@ -143,6 +143,10 @@
     "confirmCancelTitle": "Cancel this request?",
     "confirmCancelMessage": "The book goes back to available for everyone else. You would have to request it again.",
     "confirmCancelHandoverTitle": "Cancel this handover?",
-    "confirmCancelHandoverMessage": "The reservation ends and the book goes back to available. {name} will be told it was cancelled."
+    "confirmCancelHandoverMessage": "The reservation ends and the book goes back to available. {name} will be told it was cancelled.",
+    "editContact": "Change",
+    "editContactTitle": "Telegram contact",
+    "editContactHint": "The account the receiver will use to reach you. Changing it takes effect straight away.",
+    "noContactSet": "No Telegram account set"
   }
 }

@@ -4,18 +4,20 @@ import { useI18n } from 'vue-i18n'
 import type { PreviewableFile } from '@/types/documents.types'
 import PdfViewer from '@/components/documents/PdfViewer.vue'
 import * as documentsApi from '@/services/documents.api'
+import { isInlinePreviewable } from '@/utils/format'
 
 // Fullscreen in-app viewer for a single file. Handles three kinds inline:
 //  - images        → <img> with zoom, pan and rotate
 //  - pdf           → PdfViewer (pdf.js) — our own canvas renderer, so the file
 //                    gets a page-thumbnail rail instead of the browser's toolbar
-//  - office docs   → <object> of the server-generated PDF rendition
-//                    (file.preview_url), created on upload by LibreOffice. This
-//                    renders client-side, so it works everywhere — localhost
-//                    included. If a rendition is missing (older row, or
-//                    conversion was unavailable) we fall back to the Microsoft
-//                    Office Online viewer, which needs a public, internet-
-//                    reachable URL (prod only, not localhost MinIO).
+//  - office docs   → only if the row carries a PDF rendition
+//                    (file.preview_url). Those exist on documents uploaded
+//                    before the LibreOffice conversion was removed from the
+//                    API; everything newer has none and is offered as a
+//                    download instead. There is deliberately no fallback to
+//                    Microsoft's Office Online viewer — it needs a publicly
+//                    fetchable URL, the bucket is private, and a URL that DID
+//                    work would be a signed key handed to a third party.
 // Anything else isn't previewable; the parent downloads it instead.
 const props = defineProps<{
   modelValue: boolean
@@ -54,6 +56,20 @@ watch(
     urlError.value = false
     if (!open || !id) return
 
+    /**
+     * Refuse to open for something that cannot be rendered.
+     *
+     * Every caller already chooses between previewing and downloading with
+     * the same helper, but this modal has four of them and a fifth that
+     * forgot would show an empty frame. Downloading and closing is the
+     * outcome the click wanted either way.
+     */
+    if (!isInlinePreviewable(props.file)) {
+      emit('download', props.file!)
+      close()
+      return
+    }
+
     loadingUrl.value = true
     try {
       const { url } = await documentsApi.fileAccessUrl(id, 'preview')
@@ -84,15 +100,19 @@ const kind = computed<'image' | 'pdf' | 'office' | 'none'>(() => {
   return 'none'
 })
 
-// Prefer the server-generated PDF rendition (renders anywhere); only fall back
-// to the Office Online viewer when there's no rendition.
-const officeSrc = computed(() => {
-  if (!props.file) return ''
-  if (props.file.preview_url) return props.file.preview_url
-  // No URL to hand Office Online — nothing to embed.
-  if (!props.file.file_url) return ''
-  return `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(props.file.file_url)}`
-})
+/**
+ * Whether this office file has a server-generated PDF rendition.
+ *
+ * Uploads no longer produce one — the LibreOffice conversion was removed from
+ * the API — so this is true only for documents uploaded before that change.
+ * Those keep previewing; everything newer is offered as a download.
+ *
+ * There is deliberately no fallback to Microsoft's Office Online viewer. It
+ * needs a publicly fetchable URL and the documents bucket is private, so it
+ * could only ever show an error — and handing it a URL that DID work would
+ * mean sending a signed, time-limited key to a third party.
+ */
+const hasRendition = computed(() => !!props.file?.preview_url)
 
 // Hides the built-in PDF chrome (filename, page box, zoom, download, print) —
 // the modal's own top bar already offers those. Chromium honours these; other
@@ -104,20 +124,19 @@ function withoutPdfToolbar(url: string) {
 /** What the embedded viewer loads: a PDF gets the chrome stripped. */
 const embedSrc = computed(() => {
   if (!props.file) return ''
-  // The freshly signed URL wherever we have one. The list's URL is the
-  // fallback for the moments before it arrives, and for the office path with
-  // no rendition, which goes to Office Online instead.
   if (kind.value === 'pdf') {
     return withoutPdfToolbar(freshUrl.value || props.file.file_url || '')
   }
+  // An office file is only embeddable when a rendition exists. Without one the
+  // signed URL points at the .docx itself, and handing that to a PDF viewer
+  // renders a parse error where a document should be.
+  if (!hasRendition.value) return ''
   if (freshUrl.value) return withoutPdfToolbar(freshUrl.value)
-  return props.file.preview_url ? withoutPdfToolbar(props.file.preview_url) : officeSrc.value
+  return withoutPdfToolbar(props.file.preview_url ?? '')
 })
 
 /** What a "open in a new tab" link should point at for the current file. */
-const externalSrc = computed(() =>
-  kind.value === 'office' ? officeSrc.value : freshUrl.value || (props.file?.file_url ?? ''),
-)
+const externalSrc = computed(() => freshUrl.value || (props.file?.file_url ?? ''))
 
 const title = computed(() => props.file?.original_name?.trim() || 'Preview')
 

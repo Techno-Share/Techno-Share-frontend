@@ -4,9 +4,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth.store'
 import { useDocumentsStore } from '@/stores/documents.store'
-import * as documentsApi from '@/services/documents.api'
 import { useMajorsStore } from '@/stores/majors.store'
 import { formatExpiry, formatFileSize, yearMajorLabel } from '@/utils/format'
+import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
 import FileRow from '@/components/documents/FileRow.vue'
@@ -17,7 +17,7 @@ import ConfirmDeleteModal from '@/components/base/ConfirmDeleteModal.vue'
 import IconTextButton from '@/components/base/IconTextButton.vue'
 import DocumentPreviewModal from '@/components/documents/DocumentPreviewModal.vue'
 import AddFilesModal from '@/components/documents/AddFilesModal.vue'
-import type { UploadFile, PreviewableFile } from '@/types/documents.types'
+import type { UploadFile } from '@/types/documents.types'
 const { t } = useI18n({ useScope: 'global' })
 
 const route = useRoute()
@@ -257,73 +257,7 @@ async function confirmDelete() {
   }
 }
 
-/**
- * Ask the API for a fresh, authorised link.
- *
- * Was `${file.file_url}?download=…`: the bucket is private now, so the stored
- * URL is not reachable and the query string never set a filename anyway — the
- * server sets Content-Disposition on the signed URL instead.
- */
-// Only the id is used — the endpoint re-authorises and signs afresh, so
-// nothing else from the row is needed or trusted.
-async function getDownloadUrl(file: PreviewableFile) {
-  const { url } = await documentsApi.fileAccessUrl(file.id, 'download')
-  return url
-}
-
-function triggerDownload(url: string, name: string) {
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-}
-
-async function downloadFile(file: PreviewableFile) {
-  try {
-    const url = await getDownloadUrl(file)
-    triggerDownload(url, file.original_name?.trim() || 'file')
-  } catch {
-    // A refusal here means the file is no longer visible to this viewer —
-    // revoked audience, hidden, or deleted between render and click.
-    showToast(t('document.documentDetailsPage.downloadFailed'), { type: 'error' })
-  }
-}
-
-// Files we can render in-app: images + pdf natively, office docs via the
-// Office Online viewer (see DocumentPreviewModal). Everything else downloads.
-function isInlinePreviewable(name: string | null | undefined): boolean {
-  const ext = (name ?? '').split('.').pop()?.toLowerCase() ?? ''
-  return [
-    'pdf',
-    'jpg',
-    'jpeg',
-    'png',
-    'gif',
-    'webp',
-    'svg',
-    'ppt',
-    'pptx',
-    'doc',
-    'docx',
-    'xls',
-    'xlsx',
-  ].includes(ext)
-}
-
-const previewOpen = ref(false)
-const previewTarget = ref<UploadFile | null>(null)
-
-function previewFile(file: UploadFile) {
-  if (isInlinePreviewable(file.original_name)) {
-    previewTarget.value = file
-    previewOpen.value = true
-  } else {
-    // Unsupported type — just download it with its original name.
-    downloadFile(file)
-  }
-}
+const { previewOpen, previewTarget, openPreview: previewFile, downloadFile } = useFilePreview()
 
 onMounted(async () => {
   if (!canLoad.value) return

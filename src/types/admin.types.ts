@@ -11,6 +11,8 @@
  */
 
 /** A department, as every admin payload embeds it. */
+import type { Paginated } from './api.types'
+
 export interface AdminMajorRef {
   id: string
   acronym: string
@@ -39,6 +41,14 @@ export interface AdminUser {
   ban_reason: string | null
   /** Departments this user moderates; empty for an ordinary account. */
   moderates: AdminMajorRef[]
+  /**
+   * When this account last made an authenticated request, ISO.
+   *
+   * Written at most once a minute, so it trails real activity by up to that
+   * long. Null means not seen since the column was added — NOT "never signed
+   * in", which this cannot distinguish.
+   */
+  last_seen_at: string | null
 }
 
 /** One file inside an admin document payload. */
@@ -123,4 +133,23 @@ export interface AdminPendingDocument {
    *  approved. Decides which endpoint the queue calls. */
   review_scope: 'group' | 'file'
   status?: string
+}
+
+/**
+ * GET /admin/promotion-events — one scheduled rollover.
+ *
+ * A row is a promotion the ADMIN scheduled, not a student's. The date is the
+ * instant they set; when each student collected it is deliberately absent,
+ * since that is just whenever they happened to next sign in.
+ */
+export interface AdminPromotionRollover {
+  /** The instant the admin scheduled, ISO. */
+  rollover_at: string
+  /** Distinct students who have collected it so far. */
+  promoted_users: number
+  /**
+   * Accounts that already existed when it fired — the only ones it could ever
+   * promote. A rollover cannot advance an account registered after it.
+   */
+  eligible_users: number
 }

@@ -2,6 +2,19 @@ import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vu
 import { useAuthStore } from '@/stores/auth.store'
 
 const routes = [
+  /**
+   * The department-and-year gate.
+   *
+   * Deliberately outside UserLayout: the navbar would offer links the guard
+   * below immediately bounces back here, which reads as the app being broken.
+   * A student at this page has exactly one thing to do.
+   */
+  {
+    path: '/welcome',
+    name: 'welcome',
+    component: () => import('@/views/auth/WelcomeView.vue'),
+    meta: { requiresAuth: true },
+  },
   // ── Main layout ───────────────────────────────────────────────────────────
   {
     path: '/',
@@ -293,6 +306,34 @@ router.beforeEach(async (to) => {
   }
 
   if (to.meta.guestOnly && auth.isAuthenticated) {
+    return { name: 'home' }
+  }
+
+  /**
+   * The department-and-year gate.
+   *
+   * These two fields are what the audience rule matches on, so an account
+   * without them sees only unrestricted documents — a feed that looks broken
+   * rather than empty. Enforced here rather than by a dismissible modal, so it
+   * also holds on a later visit: close the tab halfway through and the next
+   * sign-in lands right back here.
+   *
+   * `isAuthenticated` is checked first because a signed-out visitor has no
+   * profile to be missing, and bouncing them here instead of to the login page
+   * would strand them.
+   */
+  const incomplete =
+    auth.isAuthenticated &&
+    !!auth.user &&
+    (!auth.user.major_id || !auth.user.year_level || !!auth.user.needs_department_choice)
+
+  // `welcome` itself must stay reachable, or the redirect loops forever.
+  if (incomplete && to.name !== 'welcome') {
+    return { name: 'welcome' }
+  }
+
+  // Nothing left to ask: the page has no reason to exist for this account.
+  if (!incomplete && to.name === 'welcome') {
     return { name: 'home' }
   }
 })

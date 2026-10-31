@@ -5,38 +5,25 @@
       <RouterView />
     </main>
 
-    <CompleteProfileModal v-if="showPrompt" @saved="dismiss" @dismiss="dismiss" />
+    <PromotionNoticeModal v-if="showNotice" @dismiss="dismiss" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
 import NavBar from '@/components/layout/NavBar.vue'
-import CompleteProfileModal from '@/components/base/CompleteProfileModal.vue'
 import { RouterView } from 'vue-router'
-import { useCompleteProfile } from '@/composables/useCompleteProfile'
-
-const route = useRoute()
-const { needsProfile, manuallyOpened, dismissedForSession, dismiss } = useCompleteProfile()
+import PromotionNoticeModal from '@/components/base/PromotionNoticeModal.vue'
+import { usePromotionNotice } from '@/composables/usePromotionNotice'
 
 /**
- * Pages whose content is filtered by the viewer's department and year. Landing
- * on one without those set means seeing a partial list with no explanation, so
- * this is where we ask for them.
+ * The department-and-year prompt used to be mounted here as a dismissible
+ * modal. It is now the `/welcome` route, enforced by the navigation guard.
+ *
+ * What remains is the promotion notice, which is the opposite case: nothing is
+ * required of the student, so it is dismissible and does not block the page
+ * behind it. It is mounted here rather than per page because the rollover is
+ * applied by `getMe`, so whichever page they land on first is the one that
+ * should congratulate them.
  */
-const AUDIENCE_ROUTES = new Set([
-  'documents',
-  'department',
-  'subjects',
-  'subject-documents',
-  'level-documents',
-])
-
-const showPrompt = computed(() => {
-  if (!needsProfile.value) return false
-  // A link asked for it, so show it even after an earlier "Not now".
-  if (manuallyOpened.value) return true
-  return !dismissedForSession.value && AUDIENCE_ROUTES.has(String(route.name ?? ''))
-})
+const { showNotice, dismiss } = usePromotionNotice()
 </script>

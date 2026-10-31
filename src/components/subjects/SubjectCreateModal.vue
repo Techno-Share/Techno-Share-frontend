@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SelectDropdown from '@/components/base/SelectDropdown.vue'
-import { languageLabelKey } from '@/utils/format'
+import { ACADEMIC_NAME_PATTERN, languageLabelKey } from '@/utils/format'
 import {
   readSubjectDraft,
   subjectDraftContext,
@@ -185,7 +185,6 @@ function handleDragLeave(event: DragEvent) {
 
 // Letters (any language, incl. combining marks for Khmer), numbers, spaces and
 // hyphens — and at least one letter/number.
-const NAME_PATTERN = /^(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}\s-]+$/u
 
 function validateSubjectName() {
   const name = subjectName.value.trim()
@@ -200,7 +199,7 @@ function validateSubjectName() {
     return false
   }
 
-  if (!NAME_PATTERN.test(name)) {
+  if (!ACADEMIC_NAME_PATTERN.test(name)) {
     nameError.value = t('common.subjectCreateModal.nameInvalid')
     return false
   }

@@ -2,12 +2,12 @@
 import { computed, onMounted, ref } from 'vue'
 import api from '@/services/http'
 import { useToast } from '@/composables/useToast'
+import { useFilePreview } from '@/composables/useFilePreview'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
 import DocumentReviewTable, { type DocumentRow } from '@/components/review/DocumentReviewTable.vue'
 import DocumentReviewCard from '@/components/review/DocumentReviewCard.vue'
 import DocumentPreviewModal from '@/components/documents/DocumentPreviewModal.vue'
-import * as documentsApi from '@/services/documents.api'
-import type { PreviewableFile, UploadFile } from '@/types/documents.types'
+import type { UploadFile } from '@/types/documents.types'
 
 /**
  * The review queue, for department moderators.
@@ -177,19 +177,7 @@ const rejectGroup = (g: { group_id: string }) => {
  * submission's own page instead, because a card has no room for a folder's
  * worth of thumbnails.
  */
-const previewOpen = ref(false)
-const previewTarget = ref<UploadFile | null>(null)
-
-function openPreview(file: UploadFile) {
-  previewTarget.value = file
-  previewOpen.value = true
-}
-
-async function downloadFile(file: PreviewableFile) {
-  // Private bucket — mint a fresh authorised link at click time.
-  const { url } = await documentsApi.fileAccessUrl(file.id, 'download')
-  window.open(url, '_blank', 'noopener')
-}
+const { previewOpen, previewTarget, openPreview, downloadFile } = useFilePreview()
 
 async function loadScope() {
   try {
